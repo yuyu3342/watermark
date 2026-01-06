@@ -7,8 +7,8 @@ const createLayer = (type = 'text', logoId = null) => ({
   type, 
   visible: true,
   name: type === 'text' ? '文字水印' : 'Logo水印',
-  blendMode: 'source-over', // 默认使用覆盖(正常)模式
-  opacity: 0.8,
+  blendMode: 'source-over', 
+  opacity: 1, // 核心修改：默认透明度改为 1 (100%)，实现完全遮挡
   rotation: 0,
   size: 150, 
   posX: 50,
@@ -61,7 +61,7 @@ const WatermarkApp = () => {
   const activeLayer = layers.find(l => l.id === activeLayerId) || layers[0];
 
   const BLEND_MODES = [
-    { value: 'source-over', label: '正常 (覆盖)' }, 
+    { value: 'source-over', label: '正常 (遮挡)' }, // 明确标识为遮挡模式
     { value: 'multiply', label: '正片叠底' },
     { value: 'screen', label: '滤色' },
     { value: 'overlay', label: '叠加' }, 
@@ -131,11 +131,10 @@ const WatermarkApp = () => {
     e.stopPropagation();
     if(window.confirm("确定删除这个图片素材吗？")) {
         setLogoLibrary(prev => prev.filter(logo => logo.id !== id));
-        // 如果有图层正在使用这个 Logo，可能需要处理（这里暂保留图层但可能显示为空）
     }
   };
 
-  // --- 新增：一键铺满功能 ---
+  // --- 新增：一键铺满功能 (强制不透明) ---
   const handleFillCanvas = () => {
     if (!activeLayer || !canvasRef.current) return;
     const canvas = canvasRef.current;
@@ -163,9 +162,10 @@ const WatermarkApp = () => {
         posX: 50,
         posY: 50,
         rotation: 0,
-        isTiled: false
+        isTiled: false,
+        opacity: 1 // 强制设置为不透明，确保遮挡效果
     });
-    setActiveOperation('已铺满');
+    setActiveOperation('已铺满 (遮挡)');
     setTimeout(() => setActiveOperation(''), 1000);
   };
 
@@ -216,7 +216,6 @@ const WatermarkApp = () => {
 
   const removeImage = (index, e) => {
     e.stopPropagation();
-    // 确认删除
     if(!window.confirm("移除这张底图？")) return;
 
     const imageToRemove = imageList[index];
@@ -342,9 +341,6 @@ const WatermarkApp = () => {
         }
         
         interactionRef.current.mode = 'idle';
-        if (!found) {
-            // 点击空白处，不做操作，或者可以取消选择 setActiveLayerId(null)
-        }
     }
   };
 
