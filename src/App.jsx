@@ -1,5 +1,5 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Download, Image as ImageIcon, X, Layers, Grid3X3, Bold, Italic, Type as TypeIcon, Blend, Plus, Trash2, CheckCircle2, Copy, Eye, EyeOff, Move, Palette, Sliders, Menu } from 'lucide-react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { Upload, Download, Image as ImageIcon, X, Layers, Grid3X3, Bold, Italic, Type as TypeIcon, Blend, Plus, Trash2, CheckCircle2, Copy, Eye, EyeOff, Move, Palette, Sliders, Menu, Maximize2, RotateCw, Check } from 'lucide-react';
 
 // --- 辅助函数：创建新图层 ---
 const createLayer = (type = 'text', logoId = null) => ({
@@ -30,6 +30,11 @@ const createLayer = (type = 'text', logoId = null) => ({
   logoId: logoId
 });
 
+// --- 几何计算辅助函数 ---
+const getDistance = (p1, p2) => Math.sqrt(Math.pow(p2.x - p1.x, 2) + Math.pow(p2.y - p1.y, 2));
+const getAngle = (p1, p2) => Math.atan2(p2.y - p1.y, p2.x - p1.x) * 180 / Math.PI;
+const getMidpoint = (p1, p2) => ({ x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 });
+
 const WatermarkApp = () => {
   // --- 核心状态 ---
   const [imageList, setImageList] = useState([]); 
@@ -45,6 +50,7 @@ const WatermarkApp = () => {
 
   // --- UI 状态 ---
   const [activeTab, setActiveTab] = useState('content'); // 'layers', 'content', 'style'
+  const [activeOperation, setActiveOperation] = useState(''); // 'moving', 'resizing', etc. (用于界面提示)
 
   // --- 资源库 ---
   const [logoLibrary, setLogoLibrary] = useState([]); 
@@ -54,10 +60,17 @@ const WatermarkApp = () => {
   const fileInputRef = useRef(null);
   const logoInputRef = useRef(null);
   
-  // 拖拽相关 Refs
-  const isDraggingRef = useRef(false);
-  const dragStartRef = useRef({ x: 0, y: 0 });
-  const initialPosRef = useRef({ x: 0, y: 0 });
+  // --- 拖拽与交互状态 Ref ---
+  const interactionRef = useRef({
+    mode: 'idle', 
+    startPointer: { x: 0, y: 0 }, 
+    startVal: {}, 
+    center: { x: 0, y: 0 },
+    // 双指手势专用
+    startDistance: 0,
+    startAngle: 0,
+    startMidpoint: { x: 0, y: 0 },
+  });
 
   // 确保初始化选中图层
   useEffect(() => {
@@ -75,7 +88,6 @@ const WatermarkApp = () => {
     { value: 'overlay', label: '叠加' },
     { value: 'soft-light', label: '柔光' },
     { value: 'hard-light', label: '强光' },
-    { value: 'color-dodge', label: '颜色减淡' },
     { value: 'difference', label: '差值' },
   ];
 
@@ -99,7 +111,7 @@ const WatermarkApp = () => {
   };
 
   const updateAllLayers = (updates) => {
-    if(window.confirm("应用此设置到所有图层？")) {
+    if(window.confirm("确定将当前设置应用到所有图层吗？")) {
        setLayers(prev => prev.map(layer => ({ ...layer, ...updates })));
     }
   };
@@ -110,7 +122,7 @@ const WatermarkApp = () => {
     newLayer.posY = 50 + (layers.length * 2);
     setLayers([...layers, newLayer]);
     setActiveLayerId(newLayer.id);
-    setActiveTab('content'); // 切换到内容页方便编辑
+    setActiveTab('content'); 
   };
 
   const removeLayer = (id, e) => {
@@ -217,63 +229,228 @@ const WatermarkApp = () => {
       setSelectedIds(selectedIds.size === imageList.length ? new Set() : new Set(imageList.map(img => img.id)));
   };
 
-  // --- 交互逻辑 (触控拖拽) ---
-  const handlePointerDown = (e) => {
-    if (!activeLayer || activeLayer.isTiled || !canvasRef.current) return;
-    // 阻止移动端浏览器默认行为（如滚动）
-    // e.preventDefault(); // 注：在 React 18+ 被动事件监听器中可能无效，改为 CSS touch-action: none
+  // --- 核心：获取图层信息 ---
+  const getLayerMetrics = useCallback((layer, canvasWidth, canvasHeight) => {
+    let contentWidth = 0, contentHeight = 0;
     
-    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+    if (layer.type === 'text') {
+        const calculatedFontSize = (canvasWidth * (layer.size / 1000)); 
+        const textLen = layer.text.length;
+        contentWidth = textLen * calculatedFontSize * (layer.text.match(/[\u4e00-\u9fa5]/) ? 1 : 0.6);
+        contentHeight = calculatedFontSize;
+    } else {
+        const logoData = logoLibrary.find(l => l.id === layer.logoId);
+        if (logoData) {
+            const logoImg = logoData.imgObject;
+            const targetWidth = (canvasWidth * (layer.size / 1000));
+            const ratio = logoImg.height / logoImg.width;
+            contentWidth = targetWidth;
+            contentHeight = targetWidth * ratio;
+        } else {
+            contentWidth = 100;
+            contentHeight = 100;
+        }
+    }
+    
+    const padding = 20; 
+    return {
+        cx: (canvasWidth * layer.posX) / 100,
+        cy: (canvasHeight * layer.posY) / 100,
+        w: contentWidth + padding,
+        h: contentHeight + padding,
+        rotation: layer.rotation * Math.PI / 180
+    };
+  }, [logoLibrary]);
 
-    isDraggingRef.current = true;
-    dragStartRef.current = { x: clientX, y: clientY };
-    initialPosRef.current = { x: activeLayer.posX, y: activeLayer.posY };
+  // --- 交互逻辑 (智能多点触控) ---
+  const handleTouchStart = (e) => {
+    if (!activeLayer || !canvasRef.current) return;
+    
+    const rect = canvasRef.current.getBoundingClientRect();
+    const scaleX = canvasRef.current.width / rect.width;
+    const scaleY = canvasRef.current.height / rect.height;
+
+    // --- 双指操作：缩放 + 旋转 + 移动 ---
+    if (e.touches.length === 2) {
+        const p1 = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+        const p2 = { x: e.touches[1].clientX, y: e.touches[1].clientY };
+
+        const distance = getDistance(p1, p2);
+        const angle = getAngle(p1, p2);
+        const midpoint = getMidpoint(p1, p2);
+
+        interactionRef.current = {
+            mode: 'gesture',
+            startDistance: distance,
+            startAngle: angle,
+            startMidpoint: midpoint,
+            startVal: { 
+                size: activeLayer.size, 
+                rotation: activeLayer.rotation,
+                posX: activeLayer.posX,
+                posY: activeLayer.posY
+            },
+            canvasSize: { w: rect.width, h: rect.height }
+        };
+        setActiveOperation('双指调整中');
+        return;
+    }
+
+    // --- 单指操作：移动/单点缩放/单点旋转 ---
+    const clientX = e.touches[0].clientX;
+    const clientY = e.touches[0].clientY;
+    
+    const mx = (clientX - rect.left) * scaleX;
+    const my = (clientY - rect.top) * scaleY;
+
+    const { cx, cy, w, h, rotation } = getLayerMetrics(activeLayer, canvasRef.current.width, canvasRef.current.height);
+
+    const dx = mx - cx;
+    const dy = my - cy;
+    const lx = dx * Math.cos(-rotation) - dy * Math.sin(-rotation);
+    const ly = dx * Math.sin(-rotation) + dy * Math.cos(-rotation);
+
+    const handleRadius = Math.max(40, canvasRef.current.width * 0.08); 
+
+    // 1. 旋转手柄 (顶部)
+    const rotateHandleY = -h/2 - handleRadius;
+    if (getDistance({x: lx, y: ly}, {x: 0, y: rotateHandleY}) < handleRadius * 1.5) {
+        interactionRef.current = {
+            mode: 'rotating',
+            startPointer: { x: clientX, y: clientY },
+            startVal: { rotation: activeLayer.rotation },
+            center: { x: cx, y: cy }
+        };
+        setActiveOperation('旋转中');
+        return;
+    }
+
+    // 2. 缩放手柄 (右下角)
+    if (getDistance({x: lx, y: ly}, {x: w/2, y: h/2}) < handleRadius * 1.5) {
+        interactionRef.current = {
+            mode: 'resizing',
+            startPointer: { x: clientX, y: clientY },
+            startVal: { size: activeLayer.size },
+            center: { x: cx, y: cy },
+        };
+        setActiveOperation('缩放中');
+        return;
+    }
+
+    // 3. 移动检测 (包围盒 + 额外缓冲)
+    if (lx >= -w/2 - 20 && lx <= w/2 + 20 && ly >= -h/2 - 20 && ly <= h/2 + 20) {
+        interactionRef.current = {
+            mode: 'moving',
+            startPointer: { x: clientX, y: clientY },
+            startVal: { posX: activeLayer.posX, posY: activeLayer.posY },
+            canvasSize: { w: rect.width, h: rect.height }
+        };
+        setActiveOperation('移动中');
+        return;
+    }
+
+    interactionRef.current.mode = 'idle';
   };
 
-  const handlePointerMove = (e) => {
-    if (!isDraggingRef.current || !activeLayer || !canvasRef.current) return;
-    
-    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+  const handleTouchMove = (e) => {
+    // 阻止浏览器默认滚动
+    // 注意：React 的 onTouchMove 被动监听可能无法阻止，通常依赖 CSS touch-action: none
+    const { mode, startPointer, startVal, center, canvasSize, startDistance, startAngle, startMidpoint } = interactionRef.current;
+    if (mode === 'idle' || !activeLayer || !canvasRef.current) return;
 
-    const rect = canvasRef.current.getBoundingClientRect();
-    const deltaX = clientX - dragStartRef.current.x;
-    const deltaY = clientY - dragStartRef.current.y;
+    // --- 双指逻辑 ---
+    if (mode === 'gesture' && e.touches.length === 2) {
+        const p1 = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+        const p2 = { x: e.touches[1].clientX, y: e.touches[1].clientY };
 
-    // 将像素位移转换为百分比 (0-100)
-    const percentX = (deltaX / rect.width) * 100;
-    const percentY = (deltaY / rect.height) * 100;
+        const currentDistance = getDistance(p1, p2);
+        const currentAngle = getAngle(p1, p2);
+        const currentMidpoint = getMidpoint(p1, p2);
 
-    const newX = initialPosRef.current.x + percentX;
-    const newY = initialPosRef.current.y + percentY;
+        // 1. 缩放计算 (比率)
+        const scaleRatio = currentDistance / startDistance;
+        const newSize = Math.max(10, startVal.size * scaleRatio); // 移除上限限制
 
-    updateLayer(activeLayer.id, { posX: newX, posY: newY });
+        // 2. 旋转计算 (增量)
+        const angleDelta = currentAngle - startAngle;
+        const newRotation = startVal.rotation + angleDelta;
+
+        // 3. 移动计算 (偏移量转百分比)
+        const deltaX = currentMidpoint.x - startMidpoint.x;
+        const deltaY = currentMidpoint.y - startMidpoint.y;
+        const percentX = (deltaX / canvasSize.w) * 100;
+        const percentY = (deltaY / canvasSize.h) * 100;
+        
+        updateLayer(activeLayer.id, { 
+            size: newSize,
+            rotation: newRotation,
+            posX: startVal.posX + percentX,
+            posY: startVal.posY + percentY
+        });
+        return;
+    }
+
+    // --- 单指逻辑 ---
+    const clientX = e.touches[0].clientX;
+    const clientY = e.touches[0].clientY;
+
+    if (mode === 'moving') {
+        const deltaX = clientX - startPointer.x;
+        const deltaY = clientY - startPointer.y;
+        const percentX = (deltaX / canvasSize.w) * 100;
+        const percentY = (deltaY / canvasSize.h) * 100;
+
+        updateLayer(activeLayer.id, { 
+            posX: startVal.posX + percentX, 
+            posY: startVal.posY + percentY 
+        });
+    } else if (mode === 'rotating') {
+        const rect = canvasRef.current.getBoundingClientRect();
+        const screenCx = rect.left + (center.x / canvasRef.current.width) * rect.width;
+        const screenCy = rect.top + (center.y / canvasRef.current.height) * rect.height;
+
+        let angle = Math.atan2(clientY - screenCy, clientX - screenCx) * 180 / Math.PI;
+        angle += 90; 
+        updateLayer(activeLayer.id, { rotation: angle });
+    } else if (mode === 'resizing') {
+        const rect = canvasRef.current.getBoundingClientRect();
+        const screenCx = rect.left + (center.x / canvasRef.current.width) * rect.width;
+        const screenCy = rect.top + (center.y / canvasRef.current.height) * rect.height;
+        
+        const currentDist = getDistance({x: screenCx, y: screenCy}, {x: clientX, y: clientY});
+        const startScreenDist = getDistance({x: screenCx, y: screenCy}, {x: startPointer.x, y: startPointer.y});
+        
+        if (startScreenDist > 0) {
+            const scaleRatio = currentDist / startScreenDist;
+            let newSize = startVal.size * scaleRatio;
+            newSize = Math.max(10, newSize); // 移除上限限制
+            updateLayer(activeLayer.id, { size: newSize });
+        }
+    }
+  };
+
+  // 鼠标兼容 (主要保留基本单指操作)
+  const handleMouseDown = (e) => {
+    // 简单的适配，将 MouseEvent 伪装成单指 TouchEvent 结构传给 handleTouchStart
+    const fakeTouch = { clientX: e.clientX, clientY: e.clientY };
+    handleTouchStart({ touches: [fakeTouch], preventDefault: ()=>{} });
+  };
+  
+  const handleMouseMove = (e) => {
+    // 只有在左键按下时才触发移动
+    if (e.buttons === 1) {
+        const fakeTouch = { clientX: e.clientX, clientY: e.clientY };
+        handleTouchMove({ touches: [fakeTouch], preventDefault: ()=>{} });
+    }
   };
 
   const handlePointerUp = () => {
-    isDraggingRef.current = false;
+    interactionRef.current.mode = 'idle';
+    setActiveOperation('');
   };
 
-  // --- 绘图逻辑 ---
-  useEffect(() => {
-    const currentImgData = imageList[selectedIndex];
-    if (!currentImgData || !canvasRef.current) return;
-
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
-    const image = currentImgData.imgObject;
-
-    canvas.width = image.width;
-    canvas.height = image.height;
-    ctx.drawImage(image, 0, 0);
-
-    layers.forEach(layer => {
-        if (layer.visible) renderSingleLayer(ctx, canvas.width, canvas.height, layer);
-    });
-  }, [imageList, selectedIndex, layers, logoLibrary]);
-
-  const renderSingleLayer = (ctx, width, height, layer) => {
+  // --- 渲染逻辑 ---
+  const renderSingleLayer = (ctx, width, height, layer, isSelected) => {
     let logoImg = null;
     if (layer.type === 'image') {
         const logoData = logoLibrary.find(l => l.id === layer.logoId);
@@ -285,10 +462,11 @@ const WatermarkApp = () => {
     ctx.globalAlpha = layer.opacity;
     
     let contentWidth, contentHeight;
+    const calculatedFontSize = (width * (layer.size / 1000)); 
+    
     if (layer.type === 'text') {
         const fontStyle = layer.isItalic ? 'italic' : 'normal';
         const fontWeight = layer.isBold ? 'bold' : 'normal';
-        const calculatedFontSize = (width * (layer.size / 1000)); 
         ctx.font = `${fontStyle} ${fontWeight} ${calculatedFontSize}px sans-serif`;
         ctx.textBaseline = 'middle';
         ctx.textAlign = 'center';
@@ -327,6 +505,50 @@ const WatermarkApp = () => {
         }
     };
 
+    // 绘制 Gizmo (移动端优化版 - 更大更清晰)
+    const drawGizmo = () => {
+        if (!isSelected || layer.isTiled) return;
+
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.shadowColor = 'transparent';
+        ctx.globalAlpha = 1.0;
+
+        const padding = 20; 
+        const boxW = contentWidth + padding * 2;
+        const boxH = contentHeight + padding * 2;
+        const handleR = Math.max(20, width * 0.04); 
+
+        // 1. 边框
+        ctx.strokeStyle = '#3b82f6';
+        ctx.lineWidth = Math.max(3, width * 0.005);
+        ctx.setLineDash([15, 10]);
+        ctx.strokeRect(-boxW/2, -boxH/2, boxW, boxH);
+        ctx.setLineDash([]);
+
+        // 2. 旋转杆
+        ctx.beginPath();
+        ctx.moveTo(0, -boxH/2);
+        ctx.lineTo(0, -boxH/2 - handleR);
+        ctx.stroke();
+        
+        // 3. 旋转手柄 (顶部) - 绿色
+        const rotateY = -boxH/2 - handleR;
+        ctx.fillStyle = '#10b981'; // green-500
+        ctx.beginPath(); ctx.arc(0, rotateY, handleR, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 3; ctx.stroke();
+        // 图标
+        ctx.fillStyle = 'white'; ctx.beginPath(); ctx.arc(0, rotateY, handleR * 0.3, 0, Math.PI * 2); ctx.fill();
+
+        // 4. 缩放手柄 (右下角) - 蓝色
+        const scaleX = boxW/2;
+        const scaleY = boxH/2;
+        ctx.fillStyle = '#3b82f6'; // blue-500
+        ctx.beginPath(); ctx.arc(scaleX, scaleY, handleR, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 3; ctx.stroke();
+        // 图标
+        ctx.fillStyle = 'white'; ctx.beginPath(); ctx.arc(scaleX, scaleY, handleR * 0.3, 0, Math.PI * 2); ctx.fill();
+    };
+
     if (layer.isTiled) {
         const baseGapX = contentWidth * 1.2; 
         const baseGapY = contentHeight * 1.2;
@@ -351,30 +573,52 @@ const WatermarkApp = () => {
         ctx.translate(x, y);
         ctx.rotate((layer.rotation * Math.PI) / 180);
         drawContent();
+        drawGizmo();
     }
     ctx.restore();
   };
 
-  // --- 导出逻辑 ---
-  const handleDownloadCurrent = () => {
-    if (!canvasRef.current) return;
-    const link = document.createElement('a');
-    link.download = `watermarked_${imageList[selectedIndex].file.name}`;
-    link.href = canvasRef.current.toDataURL('image/png', 1.0);
-    link.click();
-  };
+  useEffect(() => {
+    const currentImgData = imageList[selectedIndex];
+    if (!currentImgData || !canvasRef.current) return;
 
-  const handleBatchDownload = async () => {
-    if (!window.JSZip || imageList.length === 0) return;
-    const targets = selectedIds.size > 0 ? imageList.filter(img => selectedIds.has(img.id)) : imageList;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    const image = currentImgData.imgObject;
+
+    canvas.width = image.width;
+    canvas.height = image.height;
+    ctx.drawImage(image, 0, 0);
+
+    layers.forEach(layer => {
+        if (layer.visible) {
+            renderSingleLayer(ctx, canvas.width, canvas.height, layer, layer.id === activeLayerId);
+        }
+    });
+  }, [imageList, selectedIndex, layers, logoLibrary, activeLayerId]);
+
+  // --- 导出逻辑 ---
+  const handleDownload = async (isBatch) => {
+    if (!canvasRef.current || imageList.length === 0) return;
+    
+    const targets = isBatch 
+        ? (selectedIds.size > 0 ? imageList.filter(img => selectedIds.has(img.id)) : imageList)
+        : [imageList[selectedIndex]];
+
     if (targets.length === 0) return;
+
+    if (isBatch && !window.JSZip) {
+        alert("组件加载中，请稍后...");
+        return;
+    }
 
     setIsProcessing(true);
     setDownloadProgress(0);
-    const zip = new window.JSZip();
-    const folder = zip.folder("watermarked_images");
+
     const tempCanvas = document.createElement('canvas');
     const ctx = tempCanvas.getContext('2d');
+    const zip = isBatch ? new window.JSZip() : null;
+    const folder = isBatch ? zip.folder("watermarked_images") : null;
 
     for (let i = 0; i < targets.length; i++) {
         const imgData = targets[i];
@@ -382,92 +626,111 @@ const WatermarkApp = () => {
         tempCanvas.height = imgData.height;
         ctx.drawImage(imgData.imgObject, 0, 0);
         layers.forEach(layer => {
-            if(layer.visible) renderSingleLayer(ctx, imgData.width, imgData.height, layer);
+            if(layer.visible) renderSingleLayer(ctx, imgData.width, imgData.height, layer, false);
         });
-        const blob = await new Promise(resolve => tempCanvas.toBlob(resolve, 'image/png'));
-        folder.file(`watermarked_${imgData.file.name}`, blob);
-        setDownloadProgress(Math.round(((i + 1) / targets.length) * 100));
+        
+        if (isBatch) {
+             const blob = await new Promise(resolve => tempCanvas.toBlob(resolve, 'image/png'));
+             folder.file(`watermarked_${imgData.file.name}`, blob);
+             setDownloadProgress(Math.round(((i + 1) / targets.length) * 100));
+        } else {
+             const url = tempCanvas.toDataURL('image/png', 1.0);
+             const link = document.createElement('a');
+             link.download = `watermarked_${imgData.file.name}`;
+             link.href = url;
+             link.click();
+        }
     }
 
-    const content = await zip.generateAsync({ type: "blob" });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(content);
-    link.download = targets.length === 1 ? `watermarked_${targets[0].file.name}.zip` : `batch_watermarks_${targets.length}.zip`;
-    link.click();
+    if (isBatch) {
+        const content = await zip.generateAsync({ type: "blob" });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(content);
+        link.download = targets.length === 1 ? `watermarked_${targets[0].file.name}.zip` : `batch_watermarks_${targets.length}.zip`;
+        link.click();
+    }
     setIsProcessing(false);
     setDownloadProgress(0);
   };
 
-  // --- UI 组件：通用应用按钮 ---
   const SyncButton = ({ propKey, value }) => (
-    <button 
-        onClick={() => updateAllLayers({ [propKey]: value })}
-        className="text-gray-500 hover:text-blue-400 p-1.5 rounded-full hover:bg-gray-800 transition-colors"
-        title="应用到所有图层"
-    >
-        <Copy size={14} />
+    <button onClick={() => updateAllLayers({ [propKey]: value })} className="text-gray-500 hover:text-blue-400 p-2 rounded-full active:bg-gray-800" title="应用到所有">
+        <Copy size={16} />
     </button>
   );
 
-  // --- 渲染：欢迎页面 ---
+  const HiddenInputs = () => (
+    <>
+      <input type="file" ref={fileInputRef} onChange={handleImageUpload} accept="image/*" multiple className="hidden" />
+      <input type="file" ref={logoInputRef} onChange={handleLogoUpload} accept="image/*" multiple className="hidden" />
+    </>
+  );
+
+  // --- UI: 欢迎页 ---
   if (imageList.length === 0) {
      return (
-      <div className="min-h-screen bg-gray-950 text-white flex flex-col items-center justify-center p-6 relative overflow-hidden">
-        <div className="text-center max-w-md w-full animate-fade-in z-10">
-          <div className="mb-6 flex justify-center">
-            <div className="bg-gradient-to-tr from-blue-500 to-purple-600 p-5 rounded-2xl shadow-xl shadow-blue-900/20">
-              <Layers size={56} className="text-white" />
+      <div className="min-h-screen bg-black text-white flex flex-col items-center justify-center p-6 relative overflow-hidden">
+        <div className="text-center w-full max-w-sm animate-fade-in z-10">
+          <div className="mb-8 flex justify-center">
+            <div className="bg-gradient-to-tr from-blue-600 to-indigo-600 p-6 rounded-3xl shadow-2xl shadow-blue-900/30">
+              <Layers size={64} className="text-white" />
             </div>
           </div>
-          <h1 className="text-3xl font-bold mb-3">水印大师 <span className="text-blue-400 text-sm align-top font-normal border border-blue-500/30 px-2 py-0.5 rounded-full bg-blue-500/10">Mobile</span></h1>
-          <p className="text-gray-400 mb-8">极简操作 · 触控拖拽 · 批量导出</p>
+          <h1 className="text-4xl font-extrabold mb-4 tracking-tight">水印大师</h1>
+          <p className="text-gray-400 mb-12 text-lg">双指捏合 · 自由缩放<br/>批量导出工具</p>
           <button 
             onClick={() => fileInputRef.current.click()}
-            className="w-full bg-blue-600 hover:bg-blue-500 text-white text-lg font-semibold py-4 px-6 rounded-xl shadow-lg shadow-blue-600/20 active:scale-95 flex items-center justify-center gap-3"
+            className="w-full bg-blue-600 hover:bg-blue-500 text-white text-xl font-bold py-5 px-8 rounded-2xl shadow-lg active:scale-95 transition-transform flex items-center justify-center gap-3"
           >
-            <Upload size={24} /> 导入照片 (支持批量)
+            <Upload size={28} /> 选择照片
           </button>
-          <input type="file" ref={fileInputRef} onChange={handleImageUpload} accept="image/*" multiple className="hidden" />
+          <HiddenInputs />
         </div>
       </div>
     );
   }
 
-  // --- 渲染：主界面 ---
+  // --- UI: 主界面 ---
   return (
-    <div className="fixed inset-0 bg-black flex flex-col text-white font-sans touch-none">
+    <div className="fixed inset-0 bg-black flex flex-col text-white font-sans touch-none overflow-hidden select-none">
       
-      {/* 1. 顶部栏 (紧凑) */}
-      <div className="h-12 bg-[#18181b] border-b border-gray-800 flex items-center justify-between px-4 z-20 flex-shrink-0">
-         <div className="flex items-center gap-2 text-sm font-medium">
-             <span className="text-blue-400 font-bold">{selectedIndex + 1}</span>
-             <span className="text-gray-600">/ {imageList.length}</span>
-             {selectedIds.size > 0 && <span className="text-xs bg-blue-900/50 text-blue-300 px-1.5 py-0.5 rounded">已选 {selectedIds.size}</span>}
+      {/* 1. 顶部栏 */}
+      <div className="h-14 bg-[#18181b] flex items-center justify-between px-4 z-20 flex-shrink-0 shadow-lg">
+         <div className="flex items-center gap-3">
+             <div className="bg-gray-800 px-3 py-1 rounded-full text-sm font-medium">
+                 <span className="text-blue-400 font-bold">{selectedIndex + 1}</span>
+                 <span className="text-gray-500"> / {imageList.length}</span>
+             </div>
+             {selectedIds.size > 0 && <span className="text-xs bg-blue-900/50 text-blue-300 px-2 py-1 rounded-full">已选 {selectedIds.size}</span>}
          </div>
-         <div className="flex gap-2">
-            <button onClick={selectAll} className="p-2 text-gray-400 hover:text-white"><CheckCircle2 size={18} /></button>
+         <div className="flex gap-3">
+            <button onClick={selectAll} className="p-2 bg-gray-800 rounded-full text-gray-300 active:bg-gray-700 active:text-white transition-colors">
+                <CheckCircle2 size={20} />
+            </button>
             <button 
-                onClick={handleBatchDownload}
+                onClick={() => handleDownload(true)}
                 disabled={isProcessing}
-                className={`px-3 py-1.5 rounded-full text-xs font-bold flex items-center gap-1.5 ${isProcessing ? 'bg-gray-800 text-gray-400' : 'bg-blue-600 text-white active:scale-95'}`}
+                className={`px-5 py-2 rounded-full text-sm font-bold flex items-center gap-2 transition-all ${isProcessing ? 'bg-gray-800 text-gray-500' : 'bg-blue-600 text-white active:bg-blue-500'}`}
             >
-                {isProcessing ? '处理中...' : <><Download size={14} /> 导出</>}
+                {isProcessing ? '处理中...' : <><Download size={18} /> 导出</>}
             </button>
          </div>
       </div>
 
-      {/* 2. 画布预览区 (自适应剩余空间) */}
+      {/* 2. 画布预览区 */}
       <div 
         className="flex-1 relative bg-[#09090b] overflow-hidden flex items-center justify-center"
-        // 绑定触控事件
-        onTouchStart={handlePointerDown}
-        onTouchMove={handlePointerMove}
+        // 使用原生 touch 事件监听
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
         onTouchEnd={handlePointerUp}
-        onMouseDown={handlePointerDown}
-        onMouseMove={handlePointerMove}
+        onTouchCancel={handlePointerUp}
+        // 兼容鼠标 (单指模拟)
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
         onMouseUp={handlePointerUp}
         onMouseLeave={handlePointerUp}
-        style={{ touchAction: 'none' }} // 关键：禁止浏览器处理触摸手势
+        style={{ touchAction: 'none' }} 
       >
          {/* 透明背景格 */}
          <div className="absolute inset-0 opacity-10 pointer-events-none" style={{
@@ -476,33 +739,40 @@ const WatermarkApp = () => {
             backgroundPosition: '0 0, 0 10px, 10px -10px, -10px 0px'
          }}></div>
          
-         <div className="absolute top-4 left-0 w-full text-center pointer-events-none opacity-40 text-[10px] text-white/50 z-10">
-             单指拖动水印 · 双指缩放/旋转(待开发)
-         </div>
-
-         <canvas ref={canvasRef} className="max-w-[95%] max-h-[95%] object-contain shadow-2xl shadow-black" />
+         {!activeLayerId && (
+            <div className="absolute pointer-events-none text-gray-500 text-sm">点击底部 "+" 添加水印</div>
+         )}
+         
+         {/* 状态提示 */}
+         {activeOperation && (
+            <div className="absolute top-8 left-1/2 -translate-x-1/2 bg-black/70 backdrop-blur text-white px-4 py-1 rounded-full text-sm font-medium pointer-events-none border border-white/10 z-30">
+               {activeOperation}
+            </div>
+         )}
+         
+         <canvas ref={canvasRef} className="max-w-[92%] max-h-[92%] object-contain shadow-2xl shadow-black" />
       </div>
 
-      {/* 3. 底部缩略图 (高度固定) */}
-      <div className="h-16 bg-[#18181b] border-t border-gray-800 flex items-center px-2 gap-2 overflow-x-auto no-scrollbar z-20 flex-shrink-0">
-          <button onClick={() => fileInputRef.current.click()} className="flex-shrink-0 w-12 h-12 rounded border border-dashed border-gray-600 flex items-center justify-center text-gray-500 hover:bg-gray-800"><Plus size={18} /></button>
+      {/* 3. 底部缩略图 */}
+      <div className="h-20 bg-[#121214] border-t border-gray-800/50 flex items-center px-3 gap-3 overflow-x-auto no-scrollbar z-20 flex-shrink-0">
+          <button onClick={() => fileInputRef.current.click()} className="flex-shrink-0 w-14 h-14 rounded-xl border border-dashed border-gray-600 flex flex-col items-center justify-center text-gray-500 active:bg-gray-800">
+            <Plus size={20} /><span className="text-[10px] mt-1">加图</span>
+          </button>
           {imageList.map((img, idx) => {
               const isSelected = selectedIds.has(img.id);
               return (
-                <div key={img.id} onClick={() => setSelectedIndex(idx)} className={`relative flex-shrink-0 w-12 h-12 rounded overflow-hidden border-2 transition-all ${idx === selectedIndex ? 'border-blue-500' : 'border-transparent opacity-60'}`}>
+                <div key={img.id} onClick={() => setSelectedIndex(idx)} className={`relative flex-shrink-0 w-14 h-14 rounded-xl overflow-hidden border-2 transition-all ${idx === selectedIndex ? 'border-blue-500 scale-105' : 'border-transparent opacity-70'}`}>
                     <img src={img.src} className="w-full h-full object-cover" alt="" />
-                    <div onClick={(e) => toggleSelection(img.id, e)} className="absolute bottom-0 right-0 p-0.5 bg-black/50 backdrop-blur-sm rounded-tl">
-                        {isSelected ? <CheckCircle2 size={10} className="text-green-400" /> : <div className="w-2.5 h-2.5 rounded-full border border-gray-400" />}
-                    </div>
+                    {isSelected && <div className="absolute inset-0 bg-blue-500/20 flex items-center justify-center"><Check size={20} className="text-white drop-shadow-md"/></div>}
                 </div>
               );
           })}
       </div>
 
-      {/* 4. 控制面板 (Tab 模式) */}
-      <div className="bg-[#121214] border-t border-gray-800 flex-shrink-0 pb-safe-area">
+      {/* 4. 底部控制面板 */}
+      <div className="bg-[#18181b] border-t border-gray-800 flex-shrink-0 pb-safe-area shadow-[0_-5px_15px_rgba(0,0,0,0.3)]">
           {/* Tab 导航 */}
-          <div className="flex border-b border-gray-800">
+          <div className="flex items-center justify-around py-1">
               {[
                 { id: 'layers', icon: Layers, label: '图层' },
                 { id: 'content', icon: TypeIcon, label: '内容' },
@@ -511,33 +781,35 @@ const WatermarkApp = () => {
                   <button 
                     key={tab.id}
                     onClick={() => setActiveTab(tab.id)}
-                    className={`flex-1 py-3 flex items-center justify-center gap-2 text-xs font-bold transition-colors ${activeTab === tab.id ? 'text-blue-400 bg-blue-900/10 border-b-2 border-blue-400' : 'text-gray-500'}`}
+                    className={`flex-1 py-3 flex flex-col items-center justify-center gap-1 transition-colors relative ${activeTab === tab.id ? 'text-blue-400' : 'text-gray-500'}`}
                   >
-                      <tab.icon size={16} /> {tab.label}
+                      <tab.icon size={22} strokeWidth={activeTab === tab.id ? 2.5 : 2} /> 
+                      <span className="text-[10px] font-bold">{tab.label}</span>
+                      {activeTab === tab.id && <div className="absolute bottom-1 w-1 h-1 rounded-full bg-blue-400" />}
                   </button>
               ))}
           </div>
 
-          {/* Tab 内容区 - 固定高度可滚动 */}
-          <div className="h-56 overflow-y-auto p-4 custom-scrollbar">
-              
-              {/* Tab 1: 图层管理 */}
+          {/* 面板内容 */}
+          <div className="h-64 overflow-y-auto px-5 py-2 custom-scrollbar bg-[#121214]">
+              {/* Tab 1: 图层 */}
               {activeTab === 'layers' && (
-                  <div className="space-y-3">
-                      <div className="flex gap-2 mb-4">
-                          <button onClick={() => addLayer('text')} className="flex-1 bg-gray-800 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-2 active:bg-gray-700">+ 文字</button>
-                          <button onClick={() => logoInputRef.current.click()} className="flex-1 bg-gray-800 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-2 active:bg-gray-700">+ 图片</button>
-                          <input type="file" ref={logoInputRef} onChange={handleLogoUpload} accept="image/*" multiple className="hidden" />
+                  <div className="space-y-4 pt-2">
+                      <div className="grid grid-cols-2 gap-3">
+                          <button onClick={() => addLayer('text')} className="bg-gray-800 py-3 rounded-xl text-sm font-bold flex items-center justify-center gap-2 active:scale-95 transition-transform border border-gray-700 hover:border-blue-500/50">+ 添加文字</button>
+                          <button onClick={() => logoInputRef.current.click()} className="bg-gray-800 py-3 rounded-xl text-sm font-bold flex items-center justify-center gap-2 active:scale-95 transition-transform border border-gray-700 hover:border-blue-500/50">+ 添加图片</button>
                       </div>
                       <div className="space-y-2">
                           {layers.slice().reverse().map((layer) => (
-                              <div key={layer.id} onClick={() => setActiveLayerId(layer.id)} className={`flex items-center p-3 rounded-lg border ${layer.id === activeLayerId ? 'border-blue-500 bg-blue-900/20' : 'border-gray-800 bg-gray-900'}`}>
-                                  <span className="text-xs text-gray-400 w-8">{layer.type === 'text' ? 'T' : 'Img'}</span>
-                                  <span className="flex-1 text-sm truncate mr-2">{layer.type === 'image' ? (logoLibrary.find(l=>l.id===layer.logoId)?.name || 'Image') : layer.text}</span>
-                                  <div className="flex gap-2">
-                                      <button onClick={(e) => {e.stopPropagation(); updateLayer(layer.id, {visible: !layer.visible})}} className="text-gray-500">{layer.visible ? <Eye size={16}/> : <EyeOff size={16}/>}</button>
-                                      <button onClick={(e) => duplicateLayer(layer.id, e)} className="text-gray-500"><Copy size={16}/></button>
-                                      <button onClick={(e) => removeLayer(layer.id, e)} className="text-gray-500 hover:text-red-400"><Trash2 size={16}/></button>
+                              <div key={layer.id} onClick={() => setActiveLayerId(layer.id)} className={`flex items-center p-3 rounded-xl border transition-all active:scale-[0.99] ${layer.id === activeLayerId ? 'border-blue-500 bg-blue-900/10' : 'border-gray-800 bg-gray-900'}`}>
+                                  <div className={`w-8 h-8 rounded-lg flex items-center justify-center mr-3 ${layer.id === activeLayerId ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-500'}`}>
+                                      {layer.type === 'text' ? <TypeIcon size={16}/> : <ImageIcon size={16}/>}
+                                  </div>
+                                  <span className="flex-1 text-sm font-medium truncate text-gray-300">{layer.type === 'image' ? (logoLibrary.find(l=>l.id===layer.logoId)?.name || 'Image') : layer.text}</span>
+                                  <div className="flex gap-1">
+                                      <button onClick={(e) => {e.stopPropagation(); updateLayer(layer.id, {visible: !layer.visible})}} className="p-2 text-gray-500 active:text-white">{layer.visible ? <Eye size={18}/> : <EyeOff size={18}/>}</button>
+                                      <button onClick={(e) => duplicateLayer(layer.id, e)} className="p-2 text-gray-500 active:text-white"><Copy size={18}/></button>
+                                      <button onClick={(e) => removeLayer(layer.id, e)} className="p-2 text-gray-500 active:text-red-400"><Trash2 size={18}/></button>
                                   </div>
                               </div>
                           ))}
@@ -545,103 +817,109 @@ const WatermarkApp = () => {
                   </div>
               )}
 
-              {/* Tab 2: 内容编辑 */}
+              {/* Tab 2: 内容 */}
               {activeTab === 'content' && activeLayer && (
-                  <div className="space-y-5">
+                  <div className="space-y-6 pt-2">
                       {activeLayer.type === 'text' ? (
                           <>
                             <div className="space-y-2">
-                                <label className="text-xs text-gray-500 font-bold">文本内容</label>
-                                <input type="text" value={activeLayer.text} onChange={e => updateLayer(activeLayer.id, {text: e.target.value})} className="w-full bg-gray-800 border border-gray-700 rounded-lg p-3 text-white focus:border-blue-500 outline-none" />
+                                <label className="text-xs text-gray-400 font-bold ml-1">文本内容</label>
+                                <input type="text" value={activeLayer.text} onChange={e => updateLayer(activeLayer.id, {text: e.target.value})} className="w-full bg-gray-800 border border-gray-700 rounded-xl p-4 text-white text-base focus:border-blue-500 outline-none" placeholder="输入水印文字" />
                             </div>
-                            <div className="flex gap-3">
-                                <div className="flex-1 space-y-2">
-                                    <label className="text-xs text-gray-500 font-bold">字体颜色</label>
-                                    <div className="flex items-center gap-2 bg-gray-800 p-2 rounded-lg">
-                                        <input type="color" value={activeLayer.textColor} onChange={e => updateLayer(activeLayer.id, {textColor: e.target.value})} className="w-8 h-8 rounded border-none bg-transparent"/>
-                                        <span className="text-xs text-gray-400">{activeLayer.textColor}</span>
+                            <div className="grid grid-cols-2 gap-4">
+                                <div className="space-y-2">
+                                    <label className="text-xs text-gray-400 font-bold ml-1">颜色</label>
+                                    <div className="flex items-center gap-3 bg-gray-800 p-2 rounded-xl border border-gray-700">
+                                        <input type="color" value={activeLayer.textColor} onChange={e => updateLayer(activeLayer.id, {textColor: e.target.value})} className="w-10 h-10 rounded-lg border-none bg-transparent"/>
+                                        <span className="text-xs text-gray-400 font-mono">{activeLayer.textColor}</span>
                                     </div>
                                 </div>
-                                <div className="flex-1 space-y-2">
-                                    <label className="text-xs text-gray-500 font-bold">样式</label>
-                                    <div className="flex gap-1 h-12">
-                                        <button onClick={()=>updateLayer(activeLayer.id, {isBold: !activeLayer.isBold})} className={`flex-1 rounded border border-gray-700 ${activeLayer.isBold ? 'bg-gray-700' : 'bg-gray-800'}`}><Bold size={16} className="mx-auto"/></button>
-                                        <button onClick={()=>updateLayer(activeLayer.id, {isItalic: !activeLayer.isItalic})} className={`flex-1 rounded border border-gray-700 ${activeLayer.isItalic ? 'bg-gray-700' : 'bg-gray-800'}`}><Italic size={16} className="mx-auto"/></button>
+                                <div className="space-y-2">
+                                    <label className="text-xs text-gray-400 font-bold ml-1">样式</label>
+                                    <div className="flex gap-2 h-[58px]">
+                                        <button onClick={()=>updateLayer(activeLayer.id, {isBold: !activeLayer.isBold})} className={`flex-1 rounded-xl border border-gray-700 transition-colors ${activeLayer.isBold ? 'bg-blue-600 border-blue-500' : 'bg-gray-800 text-gray-400'}`}><Bold size={20} className="mx-auto"/></button>
+                                        <button onClick={()=>updateLayer(activeLayer.id, {isItalic: !activeLayer.isItalic})} className={`flex-1 rounded-xl border border-gray-700 transition-colors ${activeLayer.isItalic ? 'bg-blue-600 border-blue-500' : 'bg-gray-800 text-gray-400'}`}><Italic size={20} className="mx-auto"/></button>
                                     </div>
                                 </div>
                             </div>
                           </>
                       ) : (
-                          <div className="grid grid-cols-4 gap-2">
+                          <div className="grid grid-cols-4 gap-3">
                               {logoLibrary.map(logo => (
-                                  <div key={logo.id} onClick={() => updateLayer(activeLayer.id, {logoId: logo.id})} className={`aspect-square rounded border-2 bg-gray-800 p-1 ${activeLayer.logoId === logo.id ? 'border-blue-500' : 'border-transparent'}`}>
+                                  <div key={logo.id} onClick={() => updateLayer(activeLayer.id, {logoId: logo.id})} className={`aspect-square rounded-xl border-2 bg-gray-800 p-2 ${activeLayer.logoId === logo.id ? 'border-blue-500' : 'border-transparent'}`}>
                                       <img src={logo.src} className="w-full h-full object-contain" alt=""/>
                                   </div>
                               ))}
-                              <div onClick={() => logoInputRef.current.click()} className="aspect-square rounded border border-dashed border-gray-600 flex items-center justify-center text-gray-500"><Plus size={20}/></div>
+                              <div onClick={() => logoInputRef.current.click()} className="aspect-square rounded-xl border-2 border-dashed border-gray-700 flex items-center justify-center text-gray-500 active:bg-gray-800"><Plus size={24}/></div>
                           </div>
                       )}
                       
-                      {/* 混合模式放在这里 */}
                       <div className="space-y-2">
-                           <div className="flex justify-between items-center"><label className="text-xs text-gray-500 font-bold">混合模式</label><SyncButton propKey="blendMode" value={activeLayer.blendMode}/></div>
+                           <div className="flex justify-between items-center"><label className="text-xs text-gray-400 font-bold ml-1">混合模式</label><SyncButton propKey="blendMode" value={activeLayer.blendMode}/></div>
                            <div className="flex flex-wrap gap-2">
-                               {BLEND_MODES.slice(0, 4).map(m => (
-                                   <button key={m.value} onClick={() => updateLayer(activeLayer.id, {blendMode: m.value})} className={`px-3 py-1.5 rounded text-xs ${activeLayer.blendMode === m.value ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400'}`}>{m.label}</button>
+                               {BLEND_MODES.slice(0, 5).map(m => (
+                                   <button key={m.value} onClick={() => updateLayer(activeLayer.id, {blendMode: m.value})} className={`px-3 py-2 rounded-lg text-xs font-medium border ${activeLayer.blendMode === m.value ? 'bg-blue-600 border-blue-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-400'}`}>{m.label}</button>
                                ))}
                            </div>
                       </div>
                   </div>
               )}
 
-              {/* Tab 3: 样式与调整 */}
+              {/* Tab 3: 样式 (无限制版) */}
               {activeTab === 'style' && activeLayer && (
                   <div className="space-y-6 pt-2">
-                      {/* 大小 */}
-                      <div className="space-y-2">
+                      <div className="space-y-3">
                           <div className="flex justify-between items-center">
-                              <span className="text-xs text-gray-500 font-bold">大小 ({Math.round(activeLayer.size)})</span>
-                              <SyncButton propKey="size" value={activeLayer.size}/>
+                              <span className="text-xs text-gray-400 font-bold ml-1">大小 (无限制)</span>
+                              <div className="flex items-center gap-2">
+                                 <input type="number" value={Math.round(activeLayer.size)} onChange={e => updateLayer(activeLayer.id, {size: Number(e.target.value)})} className="w-16 bg-gray-800 text-right text-xs p-1 rounded border border-gray-700 text-blue-400"/>
+                                 <SyncButton propKey="size" value={activeLayer.size}/>
+                              </div>
                           </div>
-                          <input type="range" min="10" max="1000" step="1" value={Math.min(1000, activeLayer.size)} onChange={e => updateLayer(activeLayer.id, {size: Number(e.target.value)})} className="w-full h-2 bg-gray-800 rounded-lg appearance-none accent-blue-500"/>
+                          {/* 允许拉到很大 (10000)，但也可以通过输入框或双指设置更大 */}
+                          <input type="range" min="10" max="10000" step="1" value={Math.min(10000, activeLayer.size)} onChange={e => updateLayer(activeLayer.id, {size: Number(e.target.value)})} className="custom-range w-full"/>
                       </div>
 
-                      {/* 透明度 */}
-                      <div className="space-y-2">
+                      <div className="space-y-3">
                           <div className="flex justify-between items-center">
-                              <span className="text-xs text-gray-500 font-bold">不透明度 ({Math.round(activeLayer.opacity*100)}%)</span>
-                              <SyncButton propKey="opacity" value={activeLayer.opacity}/>
+                              <span className="text-xs text-gray-400 font-bold ml-1">不透明度</span>
+                              <div className="flex items-center gap-2">
+                                 <span className="text-xs bg-gray-800 px-2 py-1 rounded text-blue-400 font-mono">{Math.round(activeLayer.opacity*100)}%</span>
+                                 <SyncButton propKey="opacity" value={activeLayer.opacity}/>
+                              </div>
                           </div>
-                          <input type="range" min="0" max="1" step="0.01" value={activeLayer.opacity} onChange={e => updateLayer(activeLayer.id, {opacity: Number(e.target.value)})} className="w-full h-2 bg-gray-800 rounded-lg appearance-none accent-blue-500"/>
+                          <input type="range" min="0" max="1" step="0.01" value={activeLayer.opacity} onChange={e => updateLayer(activeLayer.id, {opacity: Number(e.target.value)})} className="custom-range w-full"/>
                       </div>
 
-                      {/* 旋转 */}
-                      <div className="space-y-2">
+                      <div className="space-y-3">
                           <div className="flex justify-between items-center">
-                              <span className="text-xs text-gray-500 font-bold">旋转 ({activeLayer.rotation}°)</span>
-                              <SyncButton propKey="rotation" value={activeLayer.rotation}/>
+                              <span className="text-xs text-gray-400 font-bold ml-1">旋转</span>
+                              <div className="flex items-center gap-2">
+                                 <span className="text-xs bg-gray-800 px-2 py-1 rounded text-blue-400 font-mono">{Math.round(activeLayer.rotation)}°</span>
+                                 <SyncButton propKey="rotation" value={activeLayer.rotation}/>
+                              </div>
                           </div>
-                          <input type="range" min="0" max="360" step="1" value={activeLayer.rotation} onChange={e => updateLayer(activeLayer.id, {rotation: Number(e.target.value)})} className="w-full h-2 bg-gray-800 rounded-lg appearance-none accent-blue-500"/>
-                      </div>
-
-                      {/* 平铺开关 */}
-                      <div className="flex items-center justify-between border-t border-gray-800 pt-4">
-                          <div className="flex items-center gap-2">
-                              <span className="text-xs font-bold text-gray-400">全屏平铺模式</span>
-                              <SyncButton propKey="isTiled" value={activeLayer.isTiled}/>
-                          </div>
-                          <button onClick={() => updateLayer(activeLayer.id, {isTiled: !activeLayer.isTiled})} className={`w-12 h-6 rounded-full relative transition-colors ${activeLayer.isTiled ? 'bg-blue-600' : 'bg-gray-700'}`}>
-                              <span className={`absolute top-1 left-1 bg-white w-4 h-4 rounded-full transition-transform ${activeLayer.isTiled ? 'translate-x-6' : 'translate-x-0'}`}/>
-                          </button>
+                          <input type="range" min="0" max="360" step="1" value={activeLayer.rotation} onChange={e => updateLayer(activeLayer.id, {rotation: Number(e.target.value)})} className="custom-range w-full"/>
                       </div>
                       
-                      {activeLayer.isTiled && (
-                          <div className="space-y-2">
-                              <div className="flex justify-between items-center">
-                                  <span className="text-xs text-gray-500 font-bold">平铺密度</span>
-                                  <SyncButton propKey="tileDensity" value={activeLayer.tileDensity}/>
+                      {/* 平铺开关 (大按钮) */}
+                      <div className="bg-gray-800/50 rounded-xl p-4 flex items-center justify-between border border-gray-800">
+                          <div className="flex items-center gap-3">
+                              <Grid3X3 size={20} className="text-gray-400"/>
+                              <div className="flex flex-col">
+                                  <span className="text-sm font-bold text-gray-300">全屏平铺</span>
+                                  <span className="text-[10px] text-gray-500">自动填满整个画面</span>
                               </div>
-                              <input type="range" min="10" max="150" value={activeLayer.tileDensity} onChange={e => updateLayer(activeLayer.id, {tileDensity: Number(e.target.value)})} className="w-full h-2 bg-gray-800 rounded-lg appearance-none accent-blue-500"/>
+                          </div>
+                          <button onClick={() => updateLayer(activeLayer.id, {isTiled: !activeLayer.isTiled})} className={`w-14 h-8 rounded-full relative transition-colors ${activeLayer.isTiled ? 'bg-blue-600' : 'bg-gray-700'}`}>
+                              <span className={`absolute top-1 left-1 bg-white w-6 h-6 rounded-full transition-transform shadow-sm ${activeLayer.isTiled ? 'translate-x-6' : 'translate-x-0'}`}/>
+                          </button>
+                      </div>
+
+                      {activeLayer.isTiled && (
+                          <div className="space-y-3">
+                              <div className="flex justify-between items-center"><span className="text-xs text-gray-400 font-bold ml-1">平铺密度</span><SyncButton propKey="tileDensity" value={activeLayer.tileDensity}/></div>
+                              <input type="range" min="10" max="150" value={activeLayer.tileDensity} onChange={e => updateLayer(activeLayer.id, {tileDensity: Number(e.target.value)})} className="custom-range w-full"/>
                           </div>
                       )}
                   </div>
@@ -649,10 +927,29 @@ const WatermarkApp = () => {
           </div>
       </div>
       
+      {/* 样式注入: 优化滑动条手感 */}
       <style>{`
         .pb-safe-area { padding-bottom: env(safe-area-inset-bottom); }
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        
+        .custom-range {
+            -webkit-appearance: none;
+            height: 6px;
+            background: #27272a;
+            border-radius: 3px;
+            outline: none;
+        }
+        .custom-range::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background: #3b82f6;
+            cursor: pointer;
+            border: 3px solid #18181b;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+        }
       `}</style>
     </div>
   );
