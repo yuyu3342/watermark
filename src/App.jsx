@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Upload, Download, Image as ImageIcon, X, Layers, Grid3X3, Bold, Italic, Type as TypeIcon, Blend, Plus, Trash2, CheckCircle2, Copy, Eye, EyeOff, Move, Palette, Sliders, Menu, Maximize, RotateCw, Check, PaintBucket, Sun } from 'lucide-react';
+import { Upload, Download, Image as ImageIcon, X, Layers, Grid3X3, Bold, Italic, Type as TypeIcon, Blend, Plus, Trash2, CheckCircle2, Copy, Eye, EyeOff, Move, Palette, Sliders, Menu, Maximize, RotateCw, Check, PaintBucket, Sun, Loader2 } from 'lucide-react';
 
 // --- 辅助配置 ---
 const createLayer = (type = 'text', logoId = null) => ({
@@ -19,13 +19,13 @@ const createLayer = (type = 'text', logoId = null) => ({
   textColor: '#ffffff',
   isBold: true,
   isItalic: false,
-  strokeWidth: 0, // 默认不描边
+  strokeWidth: 0, 
   strokeColor: '#000000',
   logoId: logoId,
   hasBackground: false,
   backgroundColor: '#000000',
   backgroundPadding: 0,
-  hasShadow: false // 关键修改：默认关闭阴影，保持原色
+  hasShadow: false 
 });
 
 // 几何算法
@@ -39,7 +39,7 @@ const WatermarkApp = () => {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [selectedIds, setSelectedIds] = useState(new Set()); 
   const [isProcessing, setIsProcessing] = useState(false);
-  const [isZipLoaded, setIsZipLoaded] = useState(false);
+  const [isZipLoaded, setIsZipLoaded] = useState(false); // 新增：跟踪 JSZip 加载状态
 
   const [layers, setLayers] = useState([createLayer('text')]); 
   const [activeLayerId, setActiveLayerId] = useState(null); 
@@ -73,14 +73,16 @@ const WatermarkApp = () => {
     { value: 'difference', label: '差值' },
   ];
 
+  // 初始化 JSZip
   useEffect(() => {
-    if (!window.JSZip) {
-      const script = document.createElement('script');
-      script.src = "https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js";
-      script.onload = () => setIsZipLoaded(true);
-      document.body.appendChild(script);
+    if (window.JSZip) {
+        setIsZipLoaded(true);
     } else {
-      setIsZipLoaded(true);
+        const script = document.createElement('script');
+        script.src = "https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js";
+        script.onload = () => setIsZipLoaded(true);
+        script.onerror = () => alert("导出组件加载失败，请刷新页面重试");
+        document.body.appendChild(script);
     }
   }, []);
 
@@ -263,6 +265,7 @@ const WatermarkApp = () => {
     const scaleX = canvasRef.current.width / rect.width;
     const scaleY = canvasRef.current.height / rect.height;
 
+    // --- 双指手势 ---
     if (e.touches.length === 2) {
         if (!activeLayer) return;
         const p1 = { x: e.touches[0].clientX, y: e.touches[0].clientY };
@@ -279,6 +282,7 @@ const WatermarkApp = () => {
         return;
     }
 
+    // --- 单指操作 ---
     const clientX = e.touches[0].clientX;
     const clientY = e.touches[0].clientY;
     const mx = (clientX - rect.left) * scaleX;
@@ -379,7 +383,7 @@ const WatermarkApp = () => {
   const handleMouseDown = (e) => handleTouchStart({ touches: [{ clientX: e.clientX, clientY: e.clientY }], preventDefault: ()=>{} });
   const handleMouseMove = (e) => { if (e.buttons === 1) handleTouchMove({ touches: [{ clientX: e.clientX, clientY: e.clientY }], preventDefault: ()=>{} }); };
 
-  // --- 画布渲染 (核心修复区) ---
+  // --- 画布渲染 ---
   const renderSingleLayer = (ctx, width, height, layer, isSelected) => {
     let logoImg = null;
     if (layer.type === 'image') {
@@ -406,15 +410,12 @@ const WatermarkApp = () => {
     const drawContent = () => {
         ctx.globalCompositeOperation = layer.blendMode;
         
-        // 背景底板
         if (layer.hasBackground) {
             const pad = layer.backgroundPadding || 0; 
             ctx.fillStyle = layer.backgroundColor;
             ctx.fillRect(-contentWidth/2 - pad, -contentHeight/2 - pad, contentWidth + pad*2, contentHeight + pad*2);
         }
 
-        // 阴影处理：只有当 hasShadow 为 true 且没有背景时才渲染
-        // 这也是解决“色调变脏”的关键
         if (layer.hasShadow && !layer.hasBackground) {
             ctx.shadowColor = "rgba(0,0,0,0.5)"; 
             ctx.shadowBlur = Math.max(2, layer.size/100); 
@@ -473,38 +474,63 @@ const WatermarkApp = () => {
   useEffect(() => {
     const imgData = imageList[selectedIndex];
     if (!imgData || !canvasRef.current) return;
-    
-    // 关键修复：开启 Display P3 色域支持
+    // 使用 Display P3 色域
     const ctx = canvasRef.current.getContext('2d', { colorSpace: 'display-p3' });
-    
     canvasRef.current.width = imgData.width; canvasRef.current.height = imgData.height;
     ctx.drawImage(imgData.imgObject, 0, 0);
     layers.forEach(l => l.visible && renderSingleLayer(ctx, imgData.width, imgData.height, l, l.id === activeLayerId));
   }, [imageList, selectedIndex, layers, activeLayerId, logoLibrary]);
 
-  // --- 导出逻辑 ---
+  // --- 导出逻辑 (修复崩溃问题) ---
   const handleDownload = async () => {
     if (!canvasRef.current || imageList.length === 0) return;
-    setIsProcessing(true); 
-    const zip = new window.JSZip(); const folder = zip.folder("watermarked");
-    const tempCanvas = document.createElement('canvas'); 
-    // 导出时同样使用 P3 色域
-    const ctx = tempCanvas.getContext('2d', { colorSpace: 'display-p3' });
     
-    for (let i = 0; i < imageList.length; i++) {
-        const img = imageList[i];
-        if (selectedIds.size > 0 && !selectedIds.has(img.id)) continue;
-        tempCanvas.width = img.width; tempCanvas.height = img.height;
-        ctx.drawImage(img.imgObject, 0, 0);
-        layers.forEach(l => l.visible && renderSingleLayer(ctx, img.width, img.height, l, false));
-        // 使用最高质量 1.0
-        const blob = await new Promise(r => tempCanvas.toBlob(r, 'image/jpeg', 1.0));
-        folder.file(`wm_${img.file.name}`, blob);
+    // 关键修复 1: 检查 JSZip 是否加载完成，避免未加载时点击崩溃
+    if (!window.JSZip) {
+      alert("组件正在初始化，请稍等 1-2 秒再点击...");
+      return;
     }
-    const content = await zip.generateAsync({ type: "blob" });
-    const link = document.createElement('a'); link.href = URL.createObjectURL(content);
-    link.download = "watermarked_images.zip"; link.click();
-    setIsProcessing(false);
+
+    try {
+      setIsProcessing(true);
+      const zip = new window.JSZip(); 
+      const folder = zip.folder("watermarked");
+      const tempCanvas = document.createElement('canvas'); 
+      // 导出同样使用 P3
+      const ctx = tempCanvas.getContext('2d', { colorSpace: 'display-p3' });
+      
+      for (let i = 0; i < imageList.length; i++) {
+          const img = imageList[i];
+          if (selectedIds.size > 0 && !selectedIds.has(img.id)) continue;
+          
+          tempCanvas.width = img.width; 
+          tempCanvas.height = img.height;
+          
+          ctx.drawImage(img.imgObject, 0, 0);
+          layers.forEach(l => l.visible && renderSingleLayer(ctx, img.width, img.height, l, false));
+          
+          // 使用 1.0 质量
+          const blob = await new Promise(r => tempCanvas.toBlob(r, 'image/jpeg', 1.0));
+          if (blob) {
+            folder.file(`wm_${img.file.name}`, blob);
+          }
+      }
+      
+      const content = await zip.generateAsync({ type: "blob" });
+      const link = document.createElement('a'); 
+      link.href = URL.createObjectURL(content);
+      link.download = "watermarked_images.zip"; 
+      link.click();
+      
+      // 关键修复 2: 及时释放内存，防止手机闪退
+      setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+      
+    } catch (error) {
+      console.error("导出失败:", error);
+      alert("导出过程中出现错误，请减少图片数量或重试");
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
   const SyncButton = ({ prop, val }) => (
@@ -534,8 +560,15 @@ const WatermarkApp = () => {
                 <span className="font-bold text-blue-400">{selectedIndex + 1} / {imageList.length}</span>
                 <button onClick={selectAll} className="p-2 bg-gray-800 rounded-full"><CheckCircle2 size={18}/></button>
             </div>
-            <button onClick={handleDownload} disabled={isProcessing} className="bg-blue-600 px-4 py-1.5 rounded-full text-sm font-bold flex gap-2">
-                {isProcessing ? '...' : <><Download size={16}/> 导出</>}
+            {/* 关键修复 3: 按钮状态反馈，防止误触 */}
+            <button 
+                onClick={handleDownload} 
+                disabled={isProcessing || !isZipLoaded} 
+                className={`px-4 py-1.5 rounded-full text-sm font-bold flex gap-2 transition-colors ${
+                    isProcessing || !isZipLoaded ? 'bg-gray-700 text-gray-400' : 'bg-blue-600 text-white'
+                }`}
+            >
+                {isProcessing ? '处理中...' : (!isZipLoaded ? '初始化...' : <><Download size={16}/> 导出</>)}
             </button>
         </div>
 
@@ -669,7 +702,6 @@ const WatermarkApp = () => {
                             </div>
                         ))}
                         
-                        {/* 投影开关 */}
                         <div className="flex items-center justify-between border-t border-gray-700 pt-2">
                             <div className="flex items-center gap-2">
                                 <Sun size={14} className="text-gray-400"/>
