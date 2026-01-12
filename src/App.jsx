@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Upload, Download, Image as ImageIcon, X, Layers, Grid3X3, Bold, Italic, Type as TypeIcon, Blend, Plus, Trash2, CheckCircle2, Copy, Eye, EyeOff, Move, Palette, Sliders, Menu, Maximize, RotateCw, Check, PaintBucket, Sun, Loader2, Wand2, Eraser, ScanFace, Undo2, Brush, Circle, PenTool } from 'lucide-react';
 
-// --- 辅助配置 ---
+// --- 1. 辅助配置 (源自未命名.txt + AI配置) ---
 const createLayer = (type = 'text', logoId = null) => ({
   id: Date.now() + Math.random().toString(),
   type, 
@@ -19,8 +19,8 @@ const createLayer = (type = 'text', logoId = null) => ({
   textColor: '#ffffff',
   isBold: true,
   isItalic: false,
-  strokeWidth: 0, // 描边宽度
-  strokeColor: '#000000', // 描边颜色
+  strokeWidth: 0, 
+  strokeColor: '#000000',
   logoId: logoId,
   hasBackground: false,
   backgroundColor: '#000000',
@@ -28,17 +28,18 @@ const createLayer = (type = 'text', logoId = null) => ({
   hasShadow: false 
 });
 
-// MediaPipe Face Mesh 面部轮廓索引
+// AI: MediaPipe Face Mesh 面部轮廓索引
 const FACE_OVAL_INDICES = [
   10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 
   152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109
 ];
 
-// 几何算法
+// 几何算法 (源自未命名.txt)
 const getDistance = (p1, p2) => Math.sqrt(Math.pow(p2.x - p1.x, 2) + Math.pow(p2.y - p1.y, 2));
 const getAngle = (p1, p2) => Math.atan2(p2.y - p1.y, p2.x - p1.x) * 180 / Math.PI;
 const getMidpoint = (p1, p2) => ({ x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 });
 
+// 动态脚本加载器
 const loadScript = (src) => {
   return new Promise((resolve, reject) => {
     if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
@@ -49,34 +50,32 @@ const loadScript = (src) => {
 };
 
 const App = () => {
-  // --- 状态管理 ---
+  // --- 2. 状态管理 ---
   const [imageList, setImageList] = useState([]); 
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [selectedIds, setSelectedIds] = useState(new Set()); 
+  
   const [isProcessing, setIsProcessing] = useState(false);
   const [loadingMsg, setLoadingMsg] = useState('');
+  const [isZipLoaded, setIsZipLoaded] = useState(false); 
   const [appMode, setAppMode] = useState('watermark'); 
 
-  // 水印状态
   const [layers, setLayers] = useState([createLayer('text')]); 
   const [activeLayerId, setActiveLayerId] = useState(null); 
   const [activeTab, setActiveTab] = useState('content'); 
   const [activeOperation, setActiveOperation] = useState(''); 
   const [logoLibrary, setLogoLibrary] = useState([]); 
 
-  // 去水印状态
   const [brushSize, setBrushSize] = useState(30);
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [maskHistory, setMaskHistory] = useState([]); 
-  
-  // Refs
-  const maskCanvasRef = useRef(null); 
-  const faceMeshRef = useRef(null); 
+
   const canvasRef = useRef(null);
+  const maskCanvasRef = useRef(null); 
+  const faceMeshRef = useRef(null);   
   const fileInputRef = useRef(null);
   const logoInputRef = useRef(null);
   
-  // 交互 Ref
   const interactionRef = useRef({
     mode: 'idle', 
     startPointer: { x: 0, y: 0 }, 
@@ -99,12 +98,16 @@ const App = () => {
     { value: 'difference', label: '差值' },
   ];
 
-  // 初始化
+  // --- 3. 初始化 ---
   useEffect(() => {
     const initResources = async () => {
-      if (!window.JSZip) {
-          try { await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"); } 
-          catch(e) { console.error("JSZip loading failed"); }
+      if (window.JSZip) {
+          setIsZipLoaded(true);
+      } else {
+          try { 
+            await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"); 
+            setIsZipLoaded(true);
+          } catch(e) { console.error("JSZip failed"); }
       }
       try {
         if (!window.FaceMesh) await loadScript("https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js");
@@ -112,7 +115,7 @@ const App = () => {
             const faceMesh = new window.FaceMesh({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`});
             faceMesh.setOptions({ maxNumFaces: 5, refineLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
             faceMeshRef.current = faceMesh;
-            console.log("FaceMesh Engine Loaded");
+            console.log("FaceMesh Loaded");
         }
       } catch (e) { console.error("AI Loading failed", e); }
     };
@@ -123,11 +126,32 @@ const App = () => {
     if (layers.length > 0 && !activeLayerId) setActiveLayerId(layers[0].id);
   }, [layers, activeLayerId]);
 
-  // --- 状态更新 ---
+  // --- 4. 核心逻辑 ---
   const updateLayer = (id, updates) => setLayers(prev => prev.map(layer => layer.id === id ? { ...layer, ...updates } : layer));
-  const updateAllLayers = (updates) => { if(window.confirm("应用到所有图层？")) setLayers(prev => prev.map(layer => ({ ...layer, ...updates }))); };
+  
+  const updateAllLayers = (updates) => {
+    if(window.confirm("确定将当前设置应用到所有图层吗？")) {
+       setLayers(prev => prev.map(layer => ({ ...layer, ...updates })));
+    }
+  };
 
-  // --- 核心功能：图层操作 ---
+  const addLayer = (type, logoId = null) => {
+    const newLayer = createLayer(type, logoId);
+    newLayer.posX = 50 + (layers.length * 2); 
+    newLayer.posY = 50 + (layers.length * 2);
+    setLayers([...layers, newLayer]);
+    setActiveLayerId(newLayer.id);
+    setActiveTab('content'); 
+  };
+
+  const removeLayer = (id, e) => {
+    e?.stopPropagation();
+    if (layers.length <= 1) return alert("至少保留一个图层");
+    const newLayers = layers.filter(l => l.id !== id);
+    setLayers(newLayers);
+    if (activeLayerId === id) setActiveLayerId(newLayers[newLayers.length - 1].id);
+  };
+
   const duplicateLayer = (id, e) => {
     e?.stopPropagation();
     const layerToCopy = layers.find(l => l.id === id);
@@ -141,7 +165,6 @@ const App = () => {
     if (!activeLayer || !canvasRef.current) return;
     const canvas = canvasRef.current;
     const canvasRatio = canvas.width / canvas.height;
-    
     let newSize = 1000; 
     if (activeLayer.type === 'text') {
         newSize = 1500; 
@@ -157,7 +180,7 @@ const App = () => {
     setTimeout(() => setActiveOperation(''), 1000);
   };
 
-  // --- 历史记录管理 (Undo) ---
+  // --- 5. AI 逻辑 ---
   const saveMaskState = () => {
       if (!maskCanvasRef.current) return;
       const ctx = maskCanvasRef.current.getContext('2d', { willReadFrequently: true });
@@ -180,15 +203,13 @@ const App = () => {
       ctx.clearRect(0, 0, maskCanvasRef.current.width, maskCanvasRef.current.height);
   };
 
-  // --- 优化后的智能消除 ---
   const applySmartRepair = async () => {
      if (!maskCanvasRef.current || imageList.length === 0) return;
      const currentImg = imageList[selectedIndex];
      if (!currentImg) return;
 
      setIsProcessing(true);
-     setLoadingMsg("正在计算消除区域...");
-
+     setLoadingMsg("AI 正在计算...");
      await new Promise(r => setTimeout(r, 50));
 
      try {
@@ -270,7 +291,6 @@ const App = () => {
      }
   };
 
-  // --- AI 检测 ---
   const detectFaces = async () => {
     const currentImg = imageList[selectedIndex];
     if (!faceMeshRef.current || !currentImg || !maskCanvasRef.current) {
@@ -279,7 +299,7 @@ const App = () => {
     }
     
     saveMaskState(); 
-    setIsAiLoading(true); setLoadingMsg("AI 扫描面部轮廓...");
+    setIsAiLoading(true); setLoadingMsg("AI 扫描中...");
     
     try {
         faceMeshRef.current.onResults((results) => {
@@ -301,9 +321,9 @@ const App = () => {
                     ctx.closePath();
                     ctx.fill();
                 });
-                setActiveOperation(`已精准识别 ${results.multiFaceLandmarks.length} 张人脸`);
+                setActiveOperation(`识别到 ${results.multiFaceLandmarks.length} 张人脸`);
             } else {
-                alert("画面中未检测到清晰人脸");
+                alert("未检测到人脸");
             }
         });
         await faceMeshRef.current.send({image: currentImg.imgObject});
@@ -313,7 +333,7 @@ const App = () => {
     }
   };
 
-  // --- 交互处理 ---
+  // --- 6. 交互处理 ---
   const handleDrawStart = (x, y) => {
       if (!maskCanvasRef.current) return;
       saveMaskState(); 
@@ -349,68 +369,146 @@ const App = () => {
 
   const handleTouchStart = (e) => {
     if (!activeLayer || !canvasRef.current) return;
+    
     if (appMode === 'eraser') {
         interactionRef.current.mode = 'drawing';
         handleDrawStart(e.touches[0].clientX, e.touches[0].clientY);
         return;
     }
+
     const rect = canvasRef.current.getBoundingClientRect();
+    
     if (e.touches.length === 2) {
         const p1 = { x: e.touches[0].clientX, y: e.touches[0].clientY };
         const p2 = { x: e.touches[1].clientX, y: e.touches[1].clientY };
         interactionRef.current = {
             mode: 'gesture',
-            startDistance: getDistance(p1, p2), startAngle: getAngle(p1, p2), startMidpoint: getMidpoint(p1, p2),
+            startDistance: getDistance(p1, p2),
+            startAngle: getAngle(p1, p2),
+            startMidpoint: getMidpoint(p1, p2),
             startVal: { size: activeLayer.size, rotation: activeLayer.rotation, posX: activeLayer.posX, posY: activeLayer.posY },
             canvasSize: { w: rect.width, h: rect.height }
         };
         setActiveOperation('双指调整');
         return;
     }
-    const clientX = e.touches[0].clientX; const clientY = e.touches[0].clientY;
-    const mx = (clientX - rect.left) * (canvasRef.current.width / rect.width);
-    const my = (clientY - rect.top) * (canvasRef.current.height / rect.height);
+
+    const clientX = e.touches[0].clientX;
+    const clientY = e.touches[0].clientY;
+    const scaleX = canvasRef.current.width / rect.width;
+    const scaleY = canvasRef.current.height / rect.height;
+    const mx = (clientX - rect.left) * scaleX;
+    const my = (clientY - rect.top) * scaleY;
     
-    const { cx, cy, w, h } = getLayerMetrics(activeLayer, canvasRef.current.width, canvasRef.current.height);
-    if (Math.abs(mx - cx) < w/2 + 40 && Math.abs(my - cy) < h/2 + 40) { 
-        interactionRef.current = { mode: 'moving', startPointer: { x: clientX, y: clientY }, startVal: { posX: activeLayer.posX, posY: activeLayer.posY }, canvasSize: { w: rect.width, h: rect.height } };
-        setActiveOperation('移动图层');
-    } else {
+    let hitActive = false;
+    if (activeLayer) {
+        const { cx, cy, w, h, rotation } = getLayerMetrics(activeLayer, canvasRef.current.width, canvasRef.current.height);
+        const dx = mx - cx;
+        const dy = my - cy;
+        const lx = dx * Math.cos(-rotation) - dy * Math.sin(-rotation);
+        const ly = dx * Math.sin(-rotation) + dy * Math.cos(-rotation);
+        const handleRadius = Math.max(40, canvasRef.current.width * 0.08); 
+
+        if (getDistance({x: lx, y: ly}, {x: 0, y: -h/2 - handleRadius}) < handleRadius * 1.5) {
+            interactionRef.current = { mode: 'rotating', startPointer: { x: clientX, y: clientY }, startVal: { rotation: activeLayer.rotation }, center: { x: cx, y: cy } };
+            setActiveOperation('旋转'); hitActive = true;
+        } 
+        else if (getDistance({x: lx, y: ly}, {x: w/2, y: h/2}) < handleRadius * 1.5) {
+            interactionRef.current = { mode: 'resizing', startPointer: { x: clientX, y: clientY }, startVal: { size: activeLayer.size }, center: { x: cx, y: cy } };
+            setActiveOperation('缩放'); hitActive = true;
+        } 
+        else if (lx >= -w/2 - 20 && lx <= w/2 + 20 && ly >= -h/2 - 20 && ly <= h/2 + 20) {
+            interactionRef.current = { mode: 'moving', startPointer: { x: clientX, y: clientY }, startVal: { posX: activeLayer.posX, posY: activeLayer.posY }, canvasSize: { w: rect.width, h: rect.height } };
+            setActiveOperation('移动'); hitActive = true;
+        }
+    }
+
+    if (!hitActive) {
+        let found = false;
+        for (let i = layers.length - 1; i >= 0; i--) {
+            const layer = layers[i];
+            if (!layer.visible) continue;
+            const { cx, cy, w, h, rotation } = getLayerMetrics(layer, canvasRef.current.width, canvasRef.current.height);
+            const dx = mx - cx;
+            const dy = my - cy;
+            if (Math.abs(dx) < w/2 + 20 && Math.abs(dy) < h/2 + 20) {
+                setActiveLayerId(layer.id);
+                found = true;
+                break;
+            }
+        }
         interactionRef.current.mode = 'idle';
     }
   };
 
   const handleTouchMove = (e) => {
-    const { mode, startPointer, startVal, canvasSize } = interactionRef.current;
+    const { mode, startPointer, startVal, center, canvasSize, startDistance, startAngle, startMidpoint } = interactionRef.current;
     if (mode === 'drawing') {
         handleDrawMove(e.touches[0].clientX, e.touches[0].clientY);
         e.preventDefault(); return;
     }
-    if (mode === 'idle') return;
+    if (mode === 'idle' || !activeLayer || !canvasRef.current) return;
 
-    if (mode === 'gesture' && e.touches.length === 2) { return; }
+    if (mode === 'gesture' && e.touches.length === 2) {
+        const p1 = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+        const p2 = { x: e.touches[1].clientX, y: e.touches[1].clientY };
+        const newSize = Math.max(10, startVal.size * (getDistance(p1, p2) / startDistance));
+        const newRotation = startVal.rotation + (getAngle(p1, p2) - startAngle);
+        const curMid = getMidpoint(p1, p2);
+        const percentX = startVal.posX + ((curMid.x - startMidpoint.x) / canvasSize.w) * 100;
+        const percentY = startVal.posY + ((curMid.y - startMidpoint.y) / canvasSize.h) * 100;
+        updateLayer(activeLayer.id, { size: newSize, rotation: newRotation, posX: percentX, posY: percentY });
+        return;
+    }
+
+    const clientX = e.touches[0].clientX;
+    const clientY = e.touches[0].clientY;
 
     if (mode === 'moving') {
-        const clientX = e.touches[0].clientX; const clientY = e.touches[0].clientY;
         updateLayer(activeLayer.id, { 
             posX: startVal.posX + ((clientX - startPointer.x) / canvasSize.w) * 100, 
             posY: startVal.posY + ((clientY - startPointer.y) / canvasSize.h) * 100 
         });
-        e.preventDefault();
+    } else if (mode === 'rotating') {
+        const rect = canvasRef.current.getBoundingClientRect();
+        const screenCx = rect.left + (center.x / canvasRef.current.width) * rect.width;
+        const screenCy = rect.top + (center.y / canvasRef.current.height) * rect.height;
+        updateLayer(activeLayer.id, { rotation: Math.atan2(clientY - screenCy, clientX - screenCx) * 180 / Math.PI + 90 });
+    } else if (mode === 'resizing') {
+        const rect = canvasRef.current.getBoundingClientRect();
+        const screenCx = rect.left + (center.x / canvasRef.current.width) * rect.width;
+        const screenCy = rect.top + (center.y / canvasRef.current.height) * rect.height;
+        const startDist = getDistance({x: screenCx, y: screenCy}, {x: startPointer.x, y: startPointer.y});
+        if (startDist > 0) {
+            const newSize = Math.max(10, startVal.size * (getDistance({x: screenCx, y: screenCy}, {x: clientX, y: clientY}) / startDist));
+            updateLayer(activeLayer.id, { size: newSize });
+        }
     }
   };
 
   const handlePointerUp = () => { interactionRef.current.mode = 'idle'; setActiveOperation(''); };
-  const handleMouseDown = (e) => { if(appMode === 'eraser') { interactionRef.current.mode = 'drawing'; handleDrawStart(e.clientX, e.clientY); } else { handleTouchStart({ touches: [{ clientX: e.clientX, clientY: e.clientY }], preventDefault: ()=>{} }); } };
-  const handleMouseMove = (e) => { if (e.buttons === 1) { if (appMode === 'eraser') handleDrawMove(e.clientX, e.clientY); else handleTouchMove({ touches: [{ clientX: e.clientX, clientY: e.clientY }], preventDefault: ()=>{} }); } };
+  const handleMouseDown = (e) => handleTouchStart({ touches: [{ clientX: e.clientX, clientY: e.clientY }], preventDefault: ()=>{} });
+  const handleMouseMove = (e) => { if (e.buttons === 1) handleTouchMove({ touches: [{ clientX: e.clientX, clientY: e.clientY }], preventDefault: ()=>{} }); };
 
-  // --- 辅助渲染 ---
-  const getLayerMetrics = (layer, canvasWidth, canvasHeight) => {
-      const fontSize = (canvasWidth * (layer.size / 1000));
-      const w = layer.type === 'text' ? layer.text.length * fontSize : (canvasWidth * (layer.size / 1000));
-      const h = fontSize;
-      return { cx: (canvasWidth * layer.posX) / 100, cy: (canvasHeight * layer.posY) / 100, w, h };
-  };
+  // --- 7. 画布渲染 ---
+  const getLayerMetrics = useCallback((layer, canvasWidth, canvasHeight) => {
+    let contentWidth = 0, contentHeight = 0;
+    if (layer.type === 'text') {
+        const fontSize = (canvasWidth * (layer.size / 1000)); 
+        const textLen = layer.text.length;
+        contentWidth = textLen * fontSize * (layer.text.match(/[\u4e00-\u9fa5]/) ? 1.1 : 0.65);
+        contentHeight = fontSize;
+    } else {
+        const logoData = logoLibrary.find(l => l.id === layer.logoId);
+        if (logoData) {
+            const targetWidth = (canvasWidth * (layer.size / 1000));
+            contentWidth = targetWidth;
+            contentHeight = targetWidth * (logoData.imgObject.height / logoData.imgObject.width);
+        } else { contentWidth = 100; contentHeight = 100; }
+    }
+    const padding = 20 + (layer.hasBackground ? 10 : 0); 
+    return { cx: (canvasWidth * layer.posX) / 100, cy: (canvasHeight * layer.posY) / 100, w: contentWidth + padding * 2, h: contentHeight + padding * 2, rotation: layer.rotation * Math.PI / 180 };
+  }, [logoLibrary]);
 
   const renderSingleLayer = (ctx, width, height, layer, isSelected) => {
     let logoImg = null;
@@ -418,38 +516,37 @@ const App = () => {
         const logoData = logoLibrary.find(l => l.id === layer.logoId);
         if (logoData) logoImg = logoData.imgObject; else return;
     }
-    ctx.save(); ctx.globalAlpha = layer.opacity;
+    ctx.save();
+    ctx.globalAlpha = layer.opacity;
+    
     let contentWidth, contentHeight;
     const fontSize = (width * (layer.size / 1000));
     
     if (layer.type === 'text') {
         ctx.font = `${layer.isItalic ? 'italic' : 'normal'} ${layer.isBold ? 'bold' : 'normal'} ${fontSize}px sans-serif`;
         ctx.textBaseline = 'middle'; ctx.textAlign = 'center';
-        contentWidth = ctx.measureText(layer.text).width; contentHeight = fontSize;
+        const measure = ctx.measureText(layer.text);
+        contentWidth = measure.width; 
+        contentHeight = fontSize;
     } else if (logoImg) {
         contentWidth = (width * (layer.size / 1000));
         contentHeight = contentWidth * (logoImg.height / logoImg.width);
     }
-    
+
     const drawContent = () => {
         ctx.globalCompositeOperation = layer.blendMode;
-        if(layer.hasBackground) {
+        if (layer.hasBackground) {
+            const pad = layer.backgroundPadding || 0; 
             ctx.fillStyle = layer.backgroundColor;
-            ctx.fillRect(-contentWidth/2 - 20, -contentHeight/2 - 20, contentWidth + 40, contentHeight + 40);
+            ctx.fillRect(-contentWidth/2 - pad, -contentHeight/2 - pad, contentWidth + pad*2, contentHeight + pad*2);
         }
         if (layer.hasShadow && !layer.hasBackground) {
-             ctx.shadowColor = "rgba(0,0,0,0.5)"; ctx.shadowBlur = Math.max(2, layer.size/100); 
-             ctx.shadowOffsetX = 2; ctx.shadowOffsetY = 2;
-        } else {
-             ctx.shadowColor = "transparent";
-        }
+            ctx.shadowColor = "rgba(0,0,0,0.5)"; ctx.shadowBlur = Math.max(2, layer.size/100); ctx.shadowOffsetX = Math.max(1, layer.size/200); ctx.shadowOffsetY = Math.max(1, layer.size/200); 
+        } else { ctx.shadowColor = "transparent"; }
+
         if (layer.type === 'text') {
-            // 补全功能：文字描边渲染
             if (layer.strokeWidth > 0) {
-                ctx.lineWidth = Math.max(1, (width * (layer.strokeWidth / 2000))); 
-                ctx.strokeStyle = layer.strokeColor; 
-                ctx.lineJoin = 'round'; 
-                ctx.strokeText(layer.text, 0, 0);
+                ctx.lineWidth = Math.max(1, (width * (layer.strokeWidth / 2000))); ctx.strokeStyle = layer.strokeColor; ctx.lineJoin = 'round'; ctx.strokeText(layer.text, 0, 0);
             }
             ctx.fillStyle = layer.textColor; ctx.fillText(layer.text, 0, 0);
         } else {
@@ -471,11 +568,15 @@ const App = () => {
         ctx.translate((width * layer.posX) / 100, (height * layer.posY) / 100);
         ctx.rotate(layer.rotation * Math.PI / 180);
         drawContent();
-        
         if (isSelected && appMode === 'watermark') {
             ctx.globalCompositeOperation = 'source-over'; ctx.shadowColor = 'transparent'; ctx.globalAlpha = 1.0;
-            ctx.strokeStyle = '#3b82f6'; ctx.lineWidth = Math.max(2, width * 0.003); 
-            ctx.strokeRect(-contentWidth/2 - 20, -contentHeight/2 - 20, contentWidth + 40, contentHeight + 40);
+            const pad = 20, boxW = contentWidth + pad * 2, boxH = contentHeight + pad * 2;
+            const handleR = Math.max(20, width * 0.04);
+            ctx.strokeStyle = '#3b82f6'; ctx.lineWidth = Math.max(3, width * 0.005); 
+            ctx.setLineDash([15, 10]); ctx.strokeRect(-boxW/2, -boxH/2, boxW, boxH); ctx.setLineDash([]);
+            ctx.beginPath(); ctx.moveTo(0, -boxH/2); ctx.lineTo(0, -boxH/2 - handleR); ctx.stroke();
+            const drawHandle = (cx, cy, color) => { ctx.fillStyle = color; ctx.beginPath(); ctx.arc(cx, cy, handleR, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; ctx.stroke(); };
+            drawHandle(0, -boxH/2 - handleR, '#10b981'); drawHandle(boxW/2, boxH/2, '#3b82f6');    
         }
     }
     ctx.restore();
@@ -488,25 +589,63 @@ const App = () => {
     canvasRef.current.width = imgData.width; canvasRef.current.height = imgData.height;
     ctx.drawImage(imgData.imgObject, 0, 0);
     layers.forEach(l => l.visible && renderSingleLayer(ctx, imgData.width, imgData.height, l, l.id === activeLayerId));
+    
     if (maskCanvasRef.current) {
         if (maskCanvasRef.current.width !== imgData.width || maskCanvasRef.current.height !== imgData.height) {
             maskCanvasRef.current.width = imgData.width;
             maskCanvasRef.current.height = imgData.height;
         }
     }
-  }, [imageList, selectedIndex, layers, activeLayerId, appMode]);
+  }, [imageList, selectedIndex, layers, activeLayerId, logoLibrary, appMode]);
 
-  const handleImageUpload = (e) => { const files = Array.from(e.target.files); if (files.length === 0) return; files.forEach((file) => { const reader = new FileReader(); reader.onload = (event) => { const img = new Image(); img.onload = () => { setImageList(prev => [...prev, { id: Date.now() + Math.random(), src: event.target.result, file, imgObject: img, width: img.width, height: img.height }]); if (imageList.length === 0) setSelectedIndex(0); }; img.src = event.target.result; }; reader.readAsDataURL(file); }); e.target.value = ''; };
-  const handleLogoUpload = (e) => { const files = Array.from(e.target.files); if (files.length === 0) return; files.forEach(file => { const reader = new FileReader(); reader.onload = (event) => { const img = new Image(); img.onload = () => { const newLogo = { id: Date.now() + Math.random(), src: event.target.result, imgObject: img, name: file.name }; setLogoLibrary(prev => [...prev, newLogo]); addLayer('image', newLogo.id); }; img.src = event.target.result; }; reader.readAsDataURL(file); }); if (logoInputRef.current) logoInputRef.current.value = ''; };
-  const deleteLogo = (id, e) => { e.stopPropagation(); if(window.confirm("确定删除这个素材？")) setLogoLibrary(prev => prev.filter(logo => logo.id !== id)); };
+  // --- 8. 图片/资源管理 ---
+  const handleImageUpload = (e) => {
+    const files = Array.from(e.target.files);
+    if (files.length === 0) return;
+    files.forEach((file) => {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const img = new Image();
+        img.onload = () => {
+          setImageList(prev => [...prev, { id: Date.now() + Math.random(), src: event.target.result, file, imgObject: img, width: img.width, height: img.height }]);
+          if (imageList.length === 0) setSelectedIndex(0);
+        };
+        img.src = event.target.result;
+      };
+      reader.readAsDataURL(file);
+    });
+    e.target.value = '';
+  };
 
-  // --- 修复功能：删除底图 ---
+  const handleLogoUpload = (e) => {
+    const files = Array.from(e.target.files);
+    if (files.length === 0) return;
+    files.forEach(file => {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const img = new Image();
+        img.onload = () => {
+          const newLogo = { id: Date.now() + Math.random(), src: event.target.result, imgObject: img, name: file.name };
+          setLogoLibrary(prev => [...prev, newLogo]);
+          addLayer('image', newLogo.id);
+        };
+        img.src = event.target.result;
+      };
+      reader.readAsDataURL(file);
+    });
+    if (logoInputRef.current) logoInputRef.current.value = '';
+  };
+
+  const deleteLogo = (id, e) => {
+    e.stopPropagation();
+    if(window.confirm("确定删除这个图片素材吗？")) setLogoLibrary(prev => prev.filter(logo => logo.id !== id));
+  };
+
   const removeImage = (index, e) => {
-    e?.stopPropagation();
+    e.stopPropagation();
     if(!window.confirm("移除这张底图？")) return;
     const imageToRemove = imageList[index];
-    const newList = imageList.filter((_, i) => i !== index);
-    setImageList(newList);
+    setImageList(prev => prev.filter((_, i) => i !== index));
     if (selectedIds.has(imageToRemove.id)) {
         const newIds = new Set(selectedIds);
         newIds.delete(imageToRemove.id);
@@ -514,145 +653,154 @@ const App = () => {
     }
     if (index === selectedIndex) setSelectedIndex(Math.max(0, index - 1));
   };
-  
-  // --- 修复功能：全选 ---
+
   const selectAll = () => {
       setSelectedIds(selectedIds.size === imageList.length ? new Set() : new Set(imageList.map(img => img.id)));
   };
 
   const handleDownload = async () => {
     if (!canvasRef.current || imageList.length === 0) return;
-    if (!window.JSZip) return alert("组件初始化中...");
+    if (!window.JSZip) return alert("组件正在初始化...");
     try {
       setIsProcessing(true); setLoadingMsg("打包中...");
-      const zip = new window.JSZip(); const folder = zip.folder("watermarked");
-      const tempCanvas = document.createElement('canvas'); const ctx = tempCanvas.getContext('2d');
+      const zip = new window.JSZip(); 
+      const folder = zip.folder("watermarked");
+      const tempCanvas = document.createElement('canvas'); 
+      const ctx = tempCanvas.getContext('2d', { colorSpace: 'display-p3' });
+      
       for (let i = 0; i < imageList.length; i++) {
           const img = imageList[i];
           if (selectedIds.size > 0 && !selectedIds.has(img.id)) continue;
-          tempCanvas.width = img.width; tempCanvas.height = img.height;
+          
+          tempCanvas.width = img.width; 
+          tempCanvas.height = img.height;
           ctx.drawImage(img.imgObject, 0, 0);
           layers.forEach(l => l.visible && renderSingleLayer(ctx, img.width, img.height, l, false));
-          const blob = await new Promise(r => tempCanvas.toBlob(r, 'image/jpeg', 0.95));
+          
+          const blob = await new Promise(r => tempCanvas.toBlob(r, 'image/jpeg', 1.0));
           if (blob) folder.file(`wm_${img.file.name}`, blob);
       }
       const content = await zip.generateAsync({ type: "blob" });
       const link = document.createElement('a'); link.href = URL.createObjectURL(content); link.download = "images.zip"; link.click();
       setTimeout(() => URL.revokeObjectURL(link.href), 1000);
-    } catch (error) { console.error(error); alert("导出错误"); } finally { setIsProcessing(false); setLoadingMsg(""); }
+    } catch (error) { console.error("导出失败:", error); alert("导出错误"); } finally { setIsProcessing(false); setLoadingMsg(""); }
   };
-  const addLayer = (type, logoId=null) => { const newLayer = createLayer(type, logoId); setLayers([...layers, newLayer]); setActiveLayerId(newLayer.id); setActiveTab('content'); };
-  const removeLayer = (id) => { if(layers.length<=1) return; setLayers(l=>l.filter(x=>x.id!==id)); };
-  
-  const SyncButton = ({ prop, val }) => ( <button onClick={() => {if(window.confirm("应用到所有图层？")) setLayers(prev => prev.map(layer => ({ ...layer, [prop]: val })))}} className="text-gray-500 hover:text-blue-400 p-2"><Copy size={14} /></button> );
+
+  const SyncButton = ({ prop, val }) => (
+    <button onClick={() => updateAllLayers({ [prop]: val })} className="text-gray-500 hover:text-blue-400 p-2"><Copy size={16} /></button>
+  );
+
+  const renderInputs = () => (
+    <>
+      <input type="file" ref={fileInputRef} onChange={handleImageUpload} accept="image/*" multiple className="hidden" />
+      <input type="file" ref={logoInputRef} onChange={handleLogoUpload} accept="image/*" multiple className="hidden" />
+    </>
+  );
 
   if (imageList.length === 0) return (
     <div className="min-h-screen bg-black text-white flex flex-col items-center justify-center p-6">
         <div className="bg-gradient-to-tr from-blue-600 to-indigo-600 p-6 rounded-3xl mb-8 shadow-xl"><Layers size={64}/></div>
         <h1 className="text-3xl font-bold mb-4">水印大师 Pro</h1>
         <button onClick={() => fileInputRef.current?.click()} className="bg-blue-600 px-8 py-4 rounded-xl font-bold flex gap-2"><Upload/> 选择照片</button>
-        <input type="file" ref={fileInputRef} onChange={handleImageUpload} accept="image/*" multiple className="hidden" />
-        <input type="file" ref={logoInputRef} onChange={handleLogoUpload} accept="image/*" multiple className="hidden" />
+        {renderInputs()}
     </div>
   );
 
   return (
     <div className="fixed inset-0 bg-black flex flex-col text-white touch-none select-none">
         {isProcessing && <div className="absolute inset-0 bg-black/80 z-50 flex flex-col items-center justify-center"><Loader2 size={48} className="animate-spin text-blue-500 mb-4"/><span className="font-bold">{loadingMsg}</span></div>}
-        
-        {/* 顶部栏 */}
+
         <div className="h-14 bg-[#18181b] flex items-center justify-between px-4 z-20">
-            {/* 修复：找回“全选”按钮 */}
             <div className="flex gap-3 items-center">
                 <span className="font-bold text-blue-400">{selectedIndex + 1} / {imageList.length}</span>
-                <button onClick={selectAll} className={`p-2 rounded-full ${selectedIds.size === imageList.length ? 'bg-blue-600' : 'bg-gray-800'}`}>
-                    <CheckCircle2 size={18}/>
-                </button>
+                <button onClick={selectAll} className={`p-2 rounded-full ${selectedIds.size === imageList.length ? 'bg-blue-600' : 'bg-gray-800'}`}><CheckCircle2 size={18}/></button>
             </div>
             
             <div className="flex bg-gray-800 rounded-lg p-1">
-                <button onClick={() => setAppMode('watermark')} className={`px-3 py-1 rounded-md text-xs font-bold flex gap-1 ${appMode==='watermark'?'bg-blue-600':'text-gray-400'}`}><Layers size={14}/> 加水印</button>
-                <button onClick={() => setAppMode('eraser')} className={`px-3 py-1 rounded-md text-xs font-bold flex gap-1 ${appMode==='eraser'?'bg-rose-600':'text-gray-400'}`}><Eraser size={14}/> 去水印</button>
+                <button onClick={() => setAppMode('watermark')} className={`px-3 py-1 rounded-md text-xs font-bold flex items-center gap-1 ${appMode==='watermark' ? 'bg-blue-600 text-white' : 'text-gray-400'}`}><Layers size={14}/> 加水印</button>
+                <button onClick={() => setAppMode('eraser')} className={`px-3 py-1 rounded-md text-xs font-bold flex items-center gap-1 ${appMode==='eraser' ? 'bg-rose-600 text-white' : 'text-gray-400'}`}><Eraser size={14}/> 去水印</button>
             </div>
-            <button onClick={handleDownload} className="px-4 py-1.5 rounded-full text-sm font-bold bg-blue-600 flex gap-2"><Download size={16}/> 导出</button>
+
+            <button onClick={handleDownload} disabled={isProcessing || !isZipLoaded} className={`px-4 py-1.5 rounded-full text-sm font-bold flex gap-2 transition-colors ${isProcessing || !isZipLoaded ? 'bg-gray-700 text-gray-400' : 'bg-blue-600 text-white'}`}>
+                {isProcessing ? '处理中...' : (!isZipLoaded ? '初始化...' : <><Download size={16}/> 导出</>)}
+            </button>
         </div>
 
-        {/* 画布区域 */}
         <div className="flex-1 relative bg-[#09090b] flex items-center justify-center overflow-hidden"
-             onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handlePointerUp}
-             onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handlePointerUp}>
+             onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handlePointerUp} onTouchCancel={handlePointerUp}
+             onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handlePointerUp} onMouseLeave={handlePointerUp}>
             {activeOperation && <div className="absolute top-4 bg-black/60 px-4 py-1 rounded-full text-sm z-30 pointer-events-none border border-white/10">{activeOperation}</div>}
             
-            <canvas ref={canvasRef} className="max-w-[95%] max-h-[95%] object-contain shadow-2xl z-10"/>
-            <canvas ref={maskCanvasRef} className={`absolute inset-0 pointer-events-none z-20 transition-opacity ${appMode === 'eraser' ? 'opacity-100' : 'opacity-0'}`} style={{ width: canvasRef.current?.style.width, height: canvasRef.current?.style.height, maxWidth: '95%', maxHeight: '95%', aspectRatio: canvasRef.current ? `${canvasRef.current.width}/${canvasRef.current.height}` : 'auto' }}/>
+            <canvas ref={canvasRef} className="max-w-[95%] max-h-[95%] object-contain shadow-2xl"/>
+            <canvas ref={maskCanvasRef} className={`absolute inset-0 pointer-events-none z-20 transition-opacity duration-200 ${appMode === 'eraser' ? 'opacity-100' : 'opacity-0'}`} style={{ width: canvasRef.current?.style.width, height: canvasRef.current?.style.height, maxWidth: '95%', maxHeight: '95%', aspectRatio: canvasRef.current ? `${canvasRef.current.width}/${canvasRef.current.height}` : 'auto' }}/>
             
-            {/* 笔刷大小预览光标 */}
             {appMode === 'eraser' && (
                 <div className="absolute pointer-events-none border-2 border-white/50 rounded-full bg-red-500/20 z-30 flex items-center justify-center" 
-                     style={{ width: brushSize, height: brushSize, left: '50%', top: '50%', transform: 'translate(-50%, -50%)', opacity: activeOperation === 'adjust_brush' ? 1 : 0, transition: 'opacity 0.2s' }}>
+                     style={{ width: brushSize, height: brushSize, left: '50%', top: '50%', transform: 'translate(-50%, -50%)', opacity: activeOperation === '双指调整' ? 0 : 1 }}>
                 </div>
             )}
         </div>
 
-        {/* 底部缩略图 */}
-        <div className="h-20 bg-[#121214] flex items-center px-2 gap-3 overflow-x-auto z-20 border-t border-gray-800">
+        <div className="h-20 bg-[#121214] flex items-center px-2 gap-3 overflow-x-auto z-20">
             <button onClick={() => fileInputRef.current?.click()} className="w-14 h-14 rounded-xl border border-dashed border-gray-600 flex flex-col items-center justify-center text-gray-500 flex-shrink-0"><Plus size={20}/><span className="text-[10px]">加图</span></button>
             {imageList.map((img, i) => (
                 <div key={img.id} onClick={() => setSelectedIndex(i)} className={`w-14 h-14 rounded-xl overflow-hidden border-2 flex-shrink-0 relative ${i === selectedIndex ? 'border-blue-500' : 'border-transparent opacity-60'}`}>
                     <img src={img.src} className="w-full h-full object-cover"/>
-                    {/* 修复：找回“选中”状态勾勾 */}
-                    {selectedIds.has(img.id) && <div className="absolute inset-0 bg-blue-500/30 flex items-center justify-center pointer-events-none"><Check size={20}/></div>}
-                    {/* 修复：找回“删除”按钮 */}
+                    {selectedIds.has(img.id) && <div className="absolute inset-0 bg-blue-500/30 flex items-center justify-center"><Check size={16}/></div>}
                     <button onClick={(e) => removeImage(i, e)} className="absolute top-0 right-0 bg-red-600 text-white w-5 h-5 flex items-center justify-center rounded-bl-lg"><X size={12}/></button>
                 </div>
             ))}
         </div>
-        <input type="file" ref={fileInputRef} onChange={handleImageUpload} accept="image/*" multiple className="hidden" />
-        <input type="file" ref={logoInputRef} onChange={handleLogoUpload} accept="image/*" multiple className="hidden" />
 
-        {/* 控制面板 */}
         <div className="bg-[#18181b] pb-safe-area z-20">
             {appMode === 'watermark' ? (
                 <>
-                    <div className="flex border-t border-gray-800">
+                    <div className="flex">
                         {['layers', 'content', 'style'].map(t => (
                             <button key={t} onClick={() => setActiveTab(t)} className={`flex-1 py-3 text-xs font-bold flex flex-col items-center gap-1 ${activeTab === t ? 'text-blue-400' : 'text-gray-500'}`}>
-                                {t === 'layers' && <Layers size={18}/>}{t === 'content' && <TypeIcon size={18}/>}{t === 'style' && <Sliders size={18}/>}
+                                {t === 'layers' && <Layers size={20}/>}{t === 'content' && <TypeIcon size={20}/>}{t === 'style' && <Sliders size={20}/>}
                                 {t === 'layers' ? '图层' : t === 'content' ? '内容' : '样式'}
                             </button>
                         ))}
                     </div>
                     <div className="h-56 overflow-y-auto px-4 py-2 bg-[#121214]">
-                        {/* --- 完整恢复的图层控制 UI --- */}
                         {activeTab === 'layers' && (
                             <div className="space-y-3">
                                 <div className="flex gap-2">
-                                    <button onClick={() => addLayer('text')} className="flex-1 bg-gray-800 py-2 rounded text-xs">+ 文字</button>
-                                    <button onClick={() => logoInputRef.current?.click()} className="flex-1 bg-gray-800 py-2 rounded text-xs">+ 图片</button>
+                                    <button onClick={() => addLayer('text')} className="flex-1 bg-gray-800 py-2 rounded text-xs font-bold">+ 文字</button>
+                                    <button onClick={() => logoInputRef.current?.click()} className="flex-1 bg-gray-800 py-2 rounded text-xs font-bold">+ 图片</button>
                                 </div>
                                 {layers.slice().reverse().map(l => (
                                     <div key={l.id} onClick={() => setActiveLayerId(l.id)} className={`flex items-center p-2 rounded border ${l.id === activeLayerId ? 'border-blue-500 bg-blue-900/10' : 'border-gray-700'}`}>
                                         <span className="flex-1 text-xs truncate">{l.type === 'image' ? (logoLibrary.find(lg=>lg.id===l.logoId)?.name || 'Image') : l.text}</span>
                                         <button onClick={(e) => {e.stopPropagation(); updateLayer(l.id, {visible: !l.visible})}} className="p-2 text-gray-400">{l.visible?<Eye size={14}/>:<EyeOff size={14}/>}</button>
                                         <button onClick={(e) => duplicateLayer(l.id, e)} className="p-2 text-gray-400"><Copy size={14}/></button>
-                                        <button onClick={(e) => {e.stopPropagation(); removeLayer(l.id)}} className="p-2 text-red-400"><Trash2 size={14}/></button>
+                                        <button onClick={(e) => removeLayer(l.id, e)} className="p-2 text-red-400"><Trash2 size={14}/></button>
                                     </div>
                                 ))}
                             </div>
                         )}
-                        {activeTab === 'content' && (
-                             <div className="space-y-4">
+                        {activeTab === 'content' && activeLayer && (
+                            <div className="space-y-4">
+                                <div className="flex items-center justify-between bg-gray-800 p-2 rounded-lg border border-gray-700">
+                                    <div className="flex items-center gap-2"><PaintBucket size={16} className="text-gray-400"/><span className="text-xs text-gray-300 font-bold">背景底板 (强遮挡)</span></div>
+                                    <div className="flex items-center gap-3">
+                                        {activeLayer.hasBackground && <div className="flex items-center gap-2"><input type="color" value={activeLayer.backgroundColor} onChange={e => updateLayer(activeLayer.id, {backgroundColor: e.target.value})} className="w-6 h-6 rounded border-none bg-transparent"/></div>}
+                                        <button onClick={() => updateLayer(activeLayer.id, {hasBackground: !activeLayer.hasBackground})} className={`w-10 h-5 rounded-full relative transition-colors ${activeLayer.hasBackground ? 'bg-green-500' : 'bg-gray-600'}`}><span className={`absolute top-1 left-1 w-3 h-3 bg-white rounded-full transition-transform ${activeLayer.hasBackground ? 'translate-x-5' : ''}`}/></button>
+                                    </div>
+                                </div>
+
                                 {activeLayer.type === 'text' ? (
                                     <>
-                                        <input type="text" value={activeLayer.text} onChange={e => updateLayer(activeLayer.id, {text: e.target.value})} className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white"/>
+                                        <input type="text" value={activeLayer.text} onChange={e => updateLayer(activeLayer.id, {text: e.target.value})} className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white outline-none"/>
                                         <div className="flex gap-2">
-                                            <input type="color" value={activeLayer.textColor} onChange={e => updateLayer(activeLayer.id, {textColor: e.target.value})} className="h-8 w-8 bg-transparent border-none"/>
-                                            <button onClick={()=>updateLayer(activeLayer.id, {isBold: !activeLayer.isBold})} className={`p-2 rounded border ${activeLayer.isBold?'bg-blue-600':''}`}><Bold size={16}/></button>
-                                            <button onClick={()=>updateLayer(activeLayer.id, {isItalic: !activeLayer.isItalic})} className={`p-2 rounded border ${activeLayer.isItalic?'bg-blue-600':''}`}><Italic size={16}/></button>
-                                            <button onClick={()=>updateLayer(activeLayer.id, {hasBackground: !activeLayer.hasBackground})} className={`p-2 rounded border ${activeLayer.hasBackground?'bg-green-600':''}`}><PaintBucket size={16}/></button>
-                                            {activeLayer.hasBackground && <input type="color" value={activeLayer.backgroundColor} onChange={e => updateLayer(activeLayer.id, {backgroundColor: e.target.value})} className="h-8 w-8 bg-transparent border-none"/>}
+                                            <div className="flex items-center gap-2 bg-gray-800 p-2 rounded border border-gray-700 flex-1">
+                                                <input type="color" value={activeLayer.textColor} onChange={e => updateLayer(activeLayer.id, {textColor: e.target.value})} className="w-6 h-6 bg-transparent border-none"/>
+                                                <span className="text-xs text-gray-400">{activeLayer.textColor}</span>
+                                            </div>
+                                            <button onClick={()=>updateLayer(activeLayer.id, {isBold: !activeLayer.isBold})} className={`p-2 rounded border ${activeLayer.isBold ? 'bg-blue-600 border-blue-600' : 'border-gray-700'}`}><Bold size={16}/></button>
+                                            <button onClick={()=>updateLayer(activeLayer.id, {isItalic: !activeLayer.isItalic})} className={`p-2 rounded border ${activeLayer.isItalic ? 'bg-blue-600 border-blue-600' : 'border-gray-700'}`}><Italic size={16}/></button>
                                         </div>
-                                        {/* 补全功能：文字描边控制 */}
                                         <div className="flex items-center gap-2">
                                             <PenTool size={16} className="text-gray-400"/>
                                             <span className="text-xs text-gray-400">描边</span>
@@ -665,53 +813,94 @@ const App = () => {
                                         {logoLibrary.map(l => (
                                             <div key={l.id} onClick={() => updateLayer(activeLayer.id, {logoId: l.id})} className={`aspect-square border rounded p-1 relative ${activeLayer.logoId === l.id ? 'border-blue-500' : 'border-gray-700'}`}><img src={l.src} className="w-full h-full object-contain"/><button onClick={(e) => deleteLogo(l.id, e)} className="absolute top-0 right-0 bg-red-600 text-white w-4 h-4 flex items-center justify-center rounded-bl"><X size={10}/></button></div>
                                         ))}
+                                        <button onClick={() => logoInputRef.current?.click()} className="border border-dashed border-gray-600 rounded flex items-center justify-center text-gray-500"><Plus size={20}/></button>
                                     </div>
                                 )}
-                                <div className="flex flex-wrap gap-2">{BLEND_MODES.map(m => (<button key={m.value} onClick={() => updateLayer(activeLayer.id, {blendMode: m.value})} className={`px-2 py-1 text-xs rounded border ${activeLayer.blendMode === m.value ? 'bg-blue-600 border-blue-600' : 'border-gray-700 text-gray-400'}`}>{m.label}</button>))}</div>
-                             </div>
+                                <div className="flex flex-wrap gap-2">{BLEND_MODES.slice(0,5).map(m => (<button key={m.value} onClick={() => updateLayer(activeLayer.id, {blendMode: m.value})} className={`px-2 py-1 text-xs rounded border ${activeLayer.blendMode === m.value ? 'bg-blue-600 border-blue-600' : 'border-gray-700 text-gray-400'}`}>{m.label}</button>))}</div>
+                                <button onClick={(e) => removeLayer(activeLayer.id, e)} className="w-full py-2 mt-2 bg-red-900/30 text-red-400 border border-red-900/50 rounded-lg text-sm font-bold flex items-center justify-center gap-2"><Trash2 size={16} /> 删除当前图层</button>
+                            </div>
                         )}
-                        {activeTab === 'style' && (
-                             <div className="space-y-4">
+                        {activeTab === 'style' && activeLayer && (
+                            <div className="space-y-4">
                                 <div className="space-y-1">
-                                    <div className="flex justify-between items-center"><span className="text-xs text-gray-400">大小</span><div className="flex gap-2"><button onClick={handleFillCanvas} className="text-[10px] bg-blue-900/30 text-blue-400 border border-blue-800 px-2 py-0.5 rounded flex items-center gap-1 active:bg-blue-800"><Maximize size={10} /> 一键铺满</button><SyncButton prop="size" val={activeLayer.size}/></div></div>
-                                    <input type="range" min="10" max="1000" value={activeLayer.size} onChange={e => updateLayer(activeLayer.id, {size: Number(e.target.value)})} className="w-full h-1 bg-gray-700 rounded accent-blue-500"/>
+                                    <div className="flex justify-between items-center">
+                                        <span className="text-xs text-gray-400">大小</span>
+                                        <div className="flex gap-2">
+                                            <button 
+                                              onClick={handleFillCanvas}
+                                              className="text-[10px] bg-blue-900/30 text-blue-400 border border-blue-800 px-2 py-0.5 rounded flex items-center gap-1 active:bg-blue-800"
+                                            >
+                                                <Maximize size={10} /> 一键铺满
+                                            </button>
+                                            <SyncButton prop="size" val={activeLayer.size}/>
+                                        </div>
+                                    </div>
+                                    <input type="range" min="10" max="10000" step="1" value={activeLayer.size} onChange={e => updateLayer(activeLayer.id, {size: Number(e.target.value)})} className="w-full h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-500"/>
                                 </div>
-                                <div className="space-y-1"><div className="flex justify-between"><span className="text-xs text-gray-400">透明度</span><SyncButton prop="opacity" val={activeLayer.opacity}/></div><input type="range" min="0" max="1" step="0.1" value={activeLayer.opacity} onChange={e => updateLayer(activeLayer.id, {opacity: Number(e.target.value)})} className="w-full h-1 bg-gray-700 rounded accent-blue-500"/></div>
-                                <div className="space-y-1"><div className="flex justify-between"><span className="text-xs text-gray-400">旋转</span><SyncButton prop="rotation" val={activeLayer.rotation}/></div><input type="range" min="0" max="360" value={activeLayer.rotation} onChange={e => updateLayer(activeLayer.id, {rotation: Number(e.target.value)})} className="w-full h-1 bg-gray-700 rounded accent-blue-500"/></div>
+
+                                {['opacity', 'rotation'].map(k => (
+                                    <div key={k} className="space-y-1">
+                                        <div className="flex justify-between"><span className="text-xs text-gray-400 capitalize">{k}</span><SyncButton prop={k} val={activeLayer[k]}/></div>
+                                        <input type="range" 
+                                            min={k === 'opacity' ? 0 : 0} 
+                                            max={k === 'opacity' ? 1 : 360} 
+                                            step={k === 'opacity' ? 0.01 : 1}
+                                            value={activeLayer[k]} 
+                                            onChange={e => updateLayer(activeLayer.id, {[k]: Number(e.target.value)})} 
+                                            className="w-full h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-500"/>
+                                    </div>
+                                ))}
                                 
-                                <div className="flex items-center justify-between border-t border-gray-700 pt-2"><div className="flex items-center gap-2"><Sun size={14} className="text-gray-400"/><span className="text-xs text-gray-400">投影</span></div><button onClick={() => updateLayer(activeLayer.id, {hasShadow: !activeLayer.hasShadow})} className={`w-10 h-5 rounded-full relative transition-colors ${activeLayer.hasShadow ? 'bg-blue-600' : 'bg-gray-600'}`}><span className={`absolute top-1 left-1 w-3 h-3 bg-white rounded-full transition-transform ${activeLayer.hasShadow ? 'translate-x-5' : ''}`}/></button></div>
-                                <div className="flex items-center justify-between border-t border-gray-700 pt-2"><span className="text-xs text-gray-400">平铺模式</span><button onClick={() => updateLayer(activeLayer.id, {isTiled: !activeLayer.isTiled})} className={`w-10 h-6 rounded-full relative transition-colors ${activeLayer.isTiled ? 'bg-blue-600' : 'bg-gray-700'}`}><span className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full transition-transform ${activeLayer.isTiled ? 'translate-x-4' : ''}`}/></button></div>
-                                {activeLayer.isTiled && (<div className="space-y-1"><div className="flex justify-between"><span className="text-xs text-gray-400">密度</span><SyncButton prop="tileDensity" val={activeLayer.tileDensity}/></div><input type="range" min="10" max="150" value={activeLayer.tileDensity} onChange={e => updateLayer(activeLayer.id, {tileDensity: Number(e.target.value)})} className="w-full h-1 bg-gray-700 rounded-lg appearance-none accent-blue-500"/></div>)}
-                             </div>
+                                <div className="flex items-center justify-between border-t border-gray-700 pt-2">
+                                    <div className="flex items-center gap-2">
+                                        <Sun size={14} className="text-gray-400"/>
+                                        <span className="text-xs text-gray-400">投影 (建议关闭保持原色)</span>
+                                    </div>
+                                    <button onClick={() => updateLayer(activeLayer.id, {hasShadow: !activeLayer.hasShadow})} className={`w-10 h-5 rounded-full relative transition-colors ${activeLayer.hasShadow ? 'bg-blue-600' : 'bg-gray-600'}`}>
+                                        <span className={`absolute top-1 left-1 w-3 h-3 bg-white rounded-full transition-transform ${activeLayer.hasShadow ? 'translate-x-5' : ''}`}/>
+                                    </button>
+                                </div>
+
+                                <div className="flex items-center justify-between border-t border-gray-700 pt-2">
+                                    <span className="text-xs text-gray-400">平铺模式</span>
+                                    <button onClick={() => updateLayer(activeLayer.id, {isTiled: !activeLayer.isTiled})} className={`w-10 h-6 rounded-full relative transition-colors ${activeLayer.isTiled ? 'bg-blue-600' : 'bg-gray-700'}`}>
+                                        <span className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full transition-transform ${activeLayer.isTiled ? 'translate-x-4' : ''}`}/>
+                                    </button>
+                                </div>
+                                {activeLayer.isTiled && (
+                                    <div className="space-y-1">
+                                        <div className="flex justify-between"><span className="text-xs text-gray-400">密度</span><SyncButton prop="tileDensity" val={activeLayer.tileDensity}/></div>
+                                        <input type="range" min="10" max="150" value={activeLayer.tileDensity} onChange={e => updateLayer(activeLayer.id, {tileDensity: Number(e.target.value)})} className="w-full h-1 bg-gray-700 rounded-lg appearance-none accent-blue-500"/>
+                                    </div>
+                                )}
+                            </div>
                         )}
                     </div>
                 </>
             ) : (
                 <div className="h-56 p-4 bg-[#121214] flex flex-col gap-4">
                     <div className="flex justify-between items-center border-b border-gray-700 pb-2">
-                         <span className="font-bold text-sm text-gray-300 flex items-center gap-2"><Wand2 size={16}/> 智能消除工具</span>
+                         <span className="font-bold text-sm text-gray-300 flex items-center gap-2"><Wand2 size={16}/> 智能消除</span>
+                         <span className="text-xs text-gray-500">涂抹或识别需要消除的区域</span>
                     </div>
                     <div className="flex gap-2">
-                        <button onClick={detectFaces} disabled={isAiLoading} className="flex-1 bg-indigo-600 hover:bg-indigo-700 py-3 rounded-lg flex flex-col items-center justify-center gap-1">
-                            {isAiLoading ? <Loader2 size={18} className="animate-spin"/> : <ScanFace size={18}/>} <span className="text-xs font-bold">AI 面部识别</span>
+                        <button onClick={detectFaces} disabled={isAiLoading} className="flex-1 bg-indigo-600 hover:bg-indigo-700 py-3 rounded-lg flex flex-col items-center justify-center gap-1 transition-colors disabled:opacity-50">
+                            {isAiLoading ? <Loader2 size={20} className="animate-spin"/> : <ScanFace size={20}/>}<span className="text-xs font-bold">AI 识别脸部</span>
                         </button>
-                        <button onClick={undoMask} disabled={maskHistory.length===0} className="flex-1 bg-gray-800 hover:bg-gray-700 py-3 rounded-lg flex flex-col items-center justify-center gap-1 disabled:opacity-30">
-                            <Undo2 size={18}/> <span className="text-xs font-bold">撤销涂抹</span>
-                        </button>
-                        <button onClick={clearMask} className="flex-1 bg-gray-800 hover:bg-gray-700 py-3 rounded-lg flex flex-col items-center justify-center gap-1">
-                            <Trash2 size={18}/> <span className="text-xs font-bold">清空</span>
-                        </button>
+                        <button onClick={undoMask} disabled={maskHistory.length===0} className="flex-1 bg-gray-800 hover:bg-gray-700 py-3 rounded-lg flex flex-col items-center justify-center gap-1 transition-colors disabled:opacity-30"><Undo2 size={20}/><span className="text-xs font-bold">撤销涂抹</span></button>
+                        <button onClick={clearMask} className="flex-1 bg-gray-800 hover:bg-gray-700 py-3 rounded-lg flex flex-col items-center justify-center gap-1 transition-colors"><Trash2 size={20}/><span className="text-xs font-bold">清空</span></button>
                     </div>
-                    <div className="space-y-2" onTouchStart={()=>setActiveOperation('adjust_brush')} onTouchEnd={()=>setActiveOperation('')}>
+                    <div className="space-y-2">
                         <div className="flex justify-between text-xs text-gray-400"><span>橡皮擦大小</span><span>{brushSize}px</span></div>
-                        <input type="range" min="5" max="150" value={brushSize} onChange={(e) => setBrushSize(Number(e.target.value))} className="w-full h-1 bg-gray-700 rounded-lg appearance-none accent-rose-500"/>
+                        <input type="range" min="5" max="100" value={brushSize} onChange={(e) => setBrushSize(Number(e.target.value))} className="w-full h-1 bg-gray-700 rounded-lg appearance-none accent-rose-500"/>
                     </div>
                     <button onClick={applySmartRepair} className="w-full bg-rose-600 hover:bg-rose-700 py-3 rounded-xl font-bold text-white flex items-center justify-center gap-2 shadow-lg shadow-rose-900/20">
-                        <Wand2 size={18}/> 开始智能消除 (Inpaint)
+                        <Wand2 size={18}/> 开始消除 (Inpaint)
                     </button>
                 </div>
             )}
         </div>
+        {renderInputs()}
         <style>{`.pb-safe-area{padding-bottom:env(safe-area-inset-bottom)}`}</style>
     </div>
   );
